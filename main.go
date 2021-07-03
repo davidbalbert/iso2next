@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -32,9 +33,11 @@ func readStrA(r io.ReaderAt, offset int64, n int) (string, error) {
 		return "", fmt.Errorf("error reading strA: %w", err)
 	}
 
+	buf = bytes.TrimRight(buf, " ")
+
 	for _, c := range buf {
 		if !contains(aChars, c) {
-			return "", fmt.Errorf("invalid strA: %s", string(buf))
+			return "", fmt.Errorf("invalid strA: %d in %s", c, string(buf))
 		}
 	}
 
@@ -48,9 +51,11 @@ func readStrD(r io.ReaderAt, offset int64, n int) (string, error) {
 		return "", fmt.Errorf("error reading strD: %w", err)
 	}
 
+	buf = bytes.TrimRight(buf, " ")
+
 	for _, c := range buf {
 		if !contains(dChars, c) {
-			return "", fmt.Errorf("invalid strD: %s", string(buf))
+			return "", fmt.Errorf("invalid strD: %d in %s", c, string(buf))
 		}
 	}
 
@@ -104,6 +109,8 @@ type vdBoot struct {
 
 type vdPrimary struct {
 	vdBase
+	systemId string
+	volumeId string
 }
 
 type vdSupplementary struct {
@@ -149,8 +156,31 @@ func readVDescriptor(r io.ReaderAt, offset int64) (vDescriptor, error) {
 }
 
 func readVdPrimary(r io.ReaderAt, offset int64) (*vdPrimary, error) {
+	buf := make([]byte, 1)
 
-	return &vdPrimary{vdBase{vtPrimary}}, nil
+	if _, err := r.ReadAt(buf, offset+6); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor: %w", err)
+	}
+
+	if buf[0] != 0x01 {
+		return nil, fmt.Errorf("invalid primary descriptor version: %d", buf[0])
+	}
+
+	systemId, err := readStrA(r, offset+8, 32)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor system id: %w", err)
+	}
+
+	volumeId, err := readStrD(r, offset+40, 32)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor volume id: %w", err)
+	}
+
+	return &vdPrimary{
+		vdBase{vType(vtPrimary)},
+		systemId,
+		volumeId,
+	}, nil
 }
 
 func eachVolume(r io.ReaderAt, fn func(vd vDescriptor, stop *bool)) error {
@@ -209,4 +239,6 @@ func main() {
 	if primary != nil {
 		fmt.Println(primary.vTypeDescription())
 	}
+
+	fmt.Println(primary)
 }
