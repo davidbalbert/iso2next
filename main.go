@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,48 @@ var (
 	dChars = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 )
 
+type reader struct {
+	io.ReaderAt
+	size   int64
+	offset int64
+}
+
+func newReader(r io.ReaderAt, size int64) *reader {
+	return &reader{
+		ReaderAt: r,
+		size:     size,
+		offset:   0,
+	}
+}
+
+func (r *reader) Seek(offset int64, whence int) (int64, error) {
+	var newOffset int64
+	switch whence {
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = r.offset + offset
+	case io.SeekEnd:
+		newOffset = r.size - 1 + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+
+	if newOffset < 0 || newOffset >= r.size {
+		return 0, fmt.Errorf("invalid offset: %d", newOffset)
+	}
+
+	r.offset = newOffset
+	return newOffset, nil
+}
+
+func (r *reader) Read(p []byte) (n int, err error) {
+	n, err = r.ReadAt(p, r.offset)
+	r.offset += int64(n)
+
+	return n, err
+}
+
 func contains(s []byte, c byte) bool {
 	for _, b := range s {
 		if b == c {
@@ -26,7 +69,7 @@ func contains(s []byte, c byte) bool {
 	return false
 }
 
-func readStrA(r io.ReaderAt, offset int64, n int) (string, error) {
+func readStrA(r *reader, offset int64, n int) (string, error) {
 	buf := make([]byte, n)
 
 	if _, err := r.ReadAt(buf, offset); err != nil {
@@ -44,7 +87,7 @@ func readStrA(r io.ReaderAt, offset int64, n int) (string, error) {
 	return string(buf), nil
 }
 
-func readStrD(r io.ReaderAt, offset int64, n int) (string, error) {
+func readStrD(r *reader, offset int64, n int) (string, error) {
 	buf := make([]byte, n)
 
 	if _, err := r.ReadAt(buf, offset); err != nil {
@@ -111,6 +154,28 @@ type vdPrimary struct {
 	vdBase
 	systemId string
 	volumeId string
+	// volumeSpaceSize             uint32
+	// volumeSetSize               uint16
+	// volumeSequenceNumber        uint16
+	// logicalBlockSize            uint16
+	// pathTableSize               uint32
+	// pathTableLocationLE         uint32
+	// optionalPathTableLocationLE uint32
+	// pathTableLocationBE         uint32
+	// optionalPathTableLocationBE uint32
+	// // TODO: root directory record
+	// volumeSetId         string
+	// publisherId         string
+	// dataPreparerId      string
+	// applicationId       string
+	// copyrightFileId     string
+	// abstractFileId      string
+	// bibliographicFileId string
+	// // TODO: volume creation date and time
+	// // TODO: volume modification date and time
+	// // TODO: volume expiration date and time
+	// // TODO: volume effective date and time
+	// fileStructureVersion uint8
 }
 
 type vdSupplementary struct {
@@ -121,7 +186,7 @@ type vdPartition struct {
 	vdBase
 }
 
-func readVDescriptor(r io.ReaderAt, offset int64) (vDescriptor, error) {
+func readVDescriptor(r *reader, offset int64) (vDescriptor, error) {
 	id, err := readStrA(r, offset+1, 5)
 	if err != nil {
 		return nil, fmt.Errorf("error reading volume identifier: %w", err)
@@ -131,16 +196,17 @@ func readVDescriptor(r io.ReaderAt, offset int64) (vDescriptor, error) {
 		return nil, fmt.Errorf("invalid volume identifier: %s", id)
 	}
 
-	typeBuf := make([]byte, 1)
-	if _, err := r.ReadAt(typeBuf, offset); err != nil {
+	var vtype byte
+	r.Seek(offset, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &vtype); err != nil {
 		return nil, fmt.Errorf("error reading volume type: %w", err)
 	}
 
-	if typeBuf[0] > byte(vtPartition) && typeBuf[0] < byte(vtTerminator) {
-		return nil, fmt.Errorf("invalid volume type: %d", typeBuf[0])
+	if vtype > byte(vtPartition) && vtype < byte(vtTerminator) {
+		return nil, fmt.Errorf("invalid volume type: %d", vtype)
 	}
 
-	vd := vdBase{vType(typeBuf[0])}
+	vd := vdBase{vType(vtype)}
 	switch vd.type_ {
 	case vtBoot:
 		return &vdBoot{vd}, nil
@@ -151,18 +217,20 @@ func readVDescriptor(r io.ReaderAt, offset int64) (vDescriptor, error) {
 	case vtPartition:
 		return &vdPartition{vd}, nil
 	default:
-		return nil, fmt.Errorf("invalid volume type: %d", typeBuf[0])
+		return nil, fmt.Errorf("invalid volume type: %d", vtype)
 	}
 }
 
-func readVdPrimary(r io.ReaderAt, offset int64) (*vdPrimary, error) {
+func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 	buf := make([]byte, 1)
 
-	if _, err := r.ReadAt(buf, offset+6); err != nil {
+	var version uint8
+	r.Seek(offset+6, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
 		return nil, fmt.Errorf("error reading primary descriptor: %w", err)
 	}
 
-	if buf[0] != 0x01 {
+	if version != 0x01 {
 		return nil, fmt.Errorf("invalid primary descriptor version: %d", buf[0])
 	}
 
@@ -176,6 +244,8 @@ func readVdPrimary(r io.ReaderAt, offset int64) (*vdPrimary, error) {
 		return nil, fmt.Errorf("error reading primary descriptor volume id: %w", err)
 	}
 
+	// var volumeSpaceSize uint32
+
 	return &vdPrimary{
 		vdBase{vType(vtPrimary)},
 		systemId,
@@ -183,7 +253,7 @@ func readVdPrimary(r io.ReaderAt, offset int64) (*vdPrimary, error) {
 	}, nil
 }
 
-func eachVolume(r io.ReaderAt, fn func(vd vDescriptor, stop *bool)) error {
+func eachVolume(r *reader, fn func(vd vDescriptor, stop *bool)) error {
 	var offset int64 = 16 * sectBytes
 
 	for {
@@ -224,8 +294,15 @@ func main() {
 	}
 	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	r := newReader(f, info.Size())
+
 	var primary vDescriptor = nil
-	err = eachVolume(f, func(vd vDescriptor, stop *bool) {
+	err = eachVolume(r, func(vd vDescriptor, stop *bool) {
 		if vd.vType() == vtPrimary {
 			primary = vd
 			*stop = true
