@@ -68,20 +68,20 @@ const (
 )
 
 type vDescriptor interface {
-	Type() vType
-	typeDescription() string
+	vType() vType
+	vTypeDescription() string
 }
 
 type vdBase struct {
-	vType
+	type_ vType
 }
 
-func (vd *vdBase) Type() vType {
-	return vd.vType
+func (vd *vdBase) vType() vType {
+	return vd.type_
 }
 
-func (vd *vdBase) typeDescription() string {
-	switch vd.vType {
+func (vd *vdBase) vTypeDescription() string {
+	switch vd.type_ {
 	case vtBoot:
 		return "boot"
 	case vtPrimary:
@@ -134,7 +134,7 @@ func readVDescriptor(r io.ReaderAt, offset int64) (vDescriptor, error) {
 	}
 
 	vd := vdBase{vType(typeBuf[0])}
-	switch vd.vType {
+	switch vd.type_ {
 	case vtBoot:
 		return &vdBoot{vd}, nil
 	case vtPrimary:
@@ -149,6 +149,7 @@ func readVDescriptor(r io.ReaderAt, offset int64) (vDescriptor, error) {
 }
 
 func readVdPrimary(r io.ReaderAt, offset int64) (*vdPrimary, error) {
+
 	return &vdPrimary{vdBase{vtPrimary}}, nil
 }
 
@@ -161,7 +162,7 @@ func eachVolume(r io.ReaderAt, fn func(vd vDescriptor, stop *bool)) error {
 			return err
 		}
 
-		if vd.Type() == vtTerminator {
+		if vd.vType() == vtTerminator {
 			break
 		}
 
@@ -195,7 +196,7 @@ func main() {
 
 	var primary vDescriptor = nil
 	err = eachVolume(f, func(vd vDescriptor, stop *bool) {
-		if vd.Type() == vtPrimary {
+		if vd.vType() == vtPrimary {
 			primary = vd
 			*stop = true
 		}
@@ -206,6 +207,6 @@ func main() {
 	}
 
 	if primary != nil {
-		fmt.Println(primary.typeDescription())
+		fmt.Println(primary.vTypeDescription())
 	}
 }
