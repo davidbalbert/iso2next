@@ -13,7 +13,8 @@ const kb = 1024
 const sectBytes = 2 * kb
 
 var (
-	aChars = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_!\"%&'()*+,-./:;<=>?]*$")
+	// I don't believe aChars are supposed to include spaces, but I've seen them in the wild, so I added them.
+	aChars = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_!\"%&'()*+,-./:;<=>?]*$ ")
 	dChars = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 )
 
@@ -152,29 +153,29 @@ type vdBoot struct {
 
 type vdPrimary struct {
 	vdBase
-	systemId string
-	volumeId string
-	// volumeSpaceSize             uint32
-	// volumeSetSize               uint16
-	// volumeSequenceNumber        uint16
-	// logicalBlockSize            uint16
-	// pathTableSize               uint32
-	// pathTableLocationLE         uint32
-	// optionalPathTableLocationLE uint32
-	// pathTableLocationBE         uint32
-	// optionalPathTableLocationBE uint32
-	// // TODO: root directory record
-	// volumeSetId         string
-	// publisherId         string
-	// dataPreparerId      string
-	// applicationId       string
-	// copyrightFileId     string
-	// abstractFileId      string
-	// bibliographicFileId string
-	// // TODO: volume creation date and time
-	// // TODO: volume modification date and time
-	// // TODO: volume expiration date and time
-	// // TODO: volume effective date and time
+	systemId                    string
+	volumeId                    string
+	volumeSpaceSize             uint32
+	volumeSetSize               uint16
+	volumeSequenceNumber        uint16
+	logicalBlockSize            uint16
+	pathTableSize               uint32
+	pathTableLocationLE         uint32
+	optionalPathTableLocationLE uint32
+	pathTableLocationBE         uint32
+	optionalPathTableLocationBE uint32
+	// TODO: root directory record
+	volumeSetId         string
+	publisherId         string
+	dataPreparerId      string
+	applicationId       string
+	copyrightFileId     string
+	abstractFileId      string
+	bibliographicFileId string
+	// TODO: volume creation date and time
+	// TODO: volume modification date and time
+	// TODO: volume expiration date and time
+	// TODO: volume effective date and time
 	// fileStructureVersion uint8
 }
 
@@ -244,12 +245,112 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 		return nil, fmt.Errorf("error reading primary descriptor volume id: %w", err)
 	}
 
-	// var volumeSpaceSize uint32
+	var volumeSpaceSize uint32
+	r.Seek(offset+80, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &volumeSpaceSize); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor volume space size: %w", err)
+	}
+
+	var volumeSetSize uint16
+	r.Seek(offset+120, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &volumeSetSize); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor volume set size: %w", err)
+	}
+
+	var volumeSequenceNumber uint16
+	r.Seek(offset+124, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &volumeSequenceNumber); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor volume sequence number: %w", err)
+	}
+
+	var logicalBlockSize uint16
+	r.Seek(offset+128, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &logicalBlockSize); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor logical block size: %w", err)
+	}
+
+	var pathTableSize uint32
+	r.Seek(offset+132, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &pathTableSize); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor path table size: %w", err)
+	}
+
+	var pathTableLocationLE uint32
+	r.Seek(offset+140, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &pathTableLocationLE); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor path table location: %w", err)
+	}
+
+	var optionalPathTableLocationLE uint32
+	if err := binary.Read(r, binary.LittleEndian, &optionalPathTableLocationLE); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor optional path table location: %w", err)
+	}
+
+	var pathTableLocationBE uint32
+	if err := binary.Read(r, binary.BigEndian, &pathTableLocationBE); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor path table location (BigEndian): %w", err)
+	}
+
+	var optionalPathTableLocationBE uint32
+	if err := binary.Read(r, binary.BigEndian, &optionalPathTableLocationBE); err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor optional path table location (BigEndian): %w", err)
+	}
+
+	volumeSetId, err := readStrD(r, offset+190, 128)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor volume set id: %w", err)
+	}
+
+	publisherId, err := readStrA(r, offset+318, 128)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor publisher id: %w", err)
+	}
+
+	dataPreparerId, err := readStrA(r, offset+446, 128)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor data preparer id: %w", err)
+	}
+
+	applicationId, err := readStrA(r, offset+574, 128)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor application id: %w", err)
+	}
+
+	copyrightFileId, err := readStrD(r, offset+702, 37)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor copyright file id: %w", err)
+	}
+
+	abstractFileId, err := readStrD(r, offset+739, 37)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor abstract file id: %w", err)
+	}
+
+	bibliographicFileId, err := readStrD(r, offset+776, 37)
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor bibliographic file id: %w", err)
+	}
 
 	return &vdPrimary{
 		vdBase{vType(vtPrimary)},
 		systemId,
 		volumeId,
+		volumeSpaceSize,
+		volumeSetSize,
+		volumeSequenceNumber,
+		logicalBlockSize,
+		pathTableSize,
+		pathTableLocationLE,
+		optionalPathTableLocationLE,
+		pathTableLocationBE,
+		optionalPathTableLocationBE,
+		volumeSetId,
+		publisherId,
+		dataPreparerId,
+		applicationId,
+		copyrightFileId,
+		abstractFileId,
+		bibliographicFileId,
 	}, nil
 }
 
