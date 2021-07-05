@@ -567,29 +567,50 @@ func NewFS(readerAt io.ReaderAt, size int64) (*FS, error) {
 	}, nil
 }
 
+func contains(a []string, s string) bool {
+	for _, e := range a {
+		if e == s {
+			return true
+		}
+	}
+	return false
+}
+
 func (fsys *FS) walk(name string) (*dirEntry, error) {
 	pathComponents := strings.Split(name, "/")
 
-	// if pathComponents[0] == "." {
-	// 	pathComponents = pathComponents[1:]
-	// }
-
-	// dirent := f.pvd.root
-
-	// for _, component := range pathComponents {
-
-	// 	if !dirent.IsDir() {
-	// 		return nil, fmt.Errorf("%s is not a directory", component)
-	// 	}
-	// }
-
-	// return dirent, nil
-
-	if len(pathComponents) == 1 && pathComponents[0] == "." {
-		return fsys.pvd.root, nil
-	} else {
-		return nil, fs.ErrNotExist
+	if pathComponents[0] == "." {
+		pathComponents = pathComponents[1:]
 	}
+
+	dirent := fsys.pvd.root
+
+	for i, component := range pathComponents {
+		last := i == len(pathComponents)-1
+
+		candidates := []string{component, component + ";1"}
+
+		f := &file{fsys, dirent, 0}
+		for {
+			child, err := f.ReadDir(1)
+			if err == io.EOF {
+				return nil, fs.ErrNotExist
+			} else if err != nil {
+				return nil, err
+			}
+
+			if contains(candidates, child[0].Name()) {
+				dirent = child[0].(*dirEntry)
+				break
+			}
+		}
+
+		if !last && !dirent.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", component)
+		}
+	}
+
+	return dirent, nil
 }
 
 func (fsys *FS) Open(name string) (fs.File, error) {
@@ -626,8 +647,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	defer fsys.Close()
+
+	// f, err := fsys.Open(".")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// dir, ok := f.(fs.ReadDirFile)
+	// if !ok {
+	// 	log.Fatal("not a directory")
+	// }
+
+	// entries, err := dir.ReadDir(-1)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
 
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
