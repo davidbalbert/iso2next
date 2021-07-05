@@ -463,6 +463,7 @@ func (d *dirEntry) Info() (fs.FileInfo, error) {
 type file struct {
 	fs *FS
 	*dirEntry
+	offset int64
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
@@ -486,30 +487,35 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 		return nil, fmt.Errorf("can't call ReadDir on a file")
 	}
 
-	// todo: n
-
-	start := int64(f.dirEntry.lba) * int64(f.fs.pvd.logicalBlockSize)
-	offset := start
-
 	var entries []fs.DirEntry
 	if n > 0 {
-		entries = make([]fs.DirEntry, n)
+		entries = make([]fs.DirEntry, 0, n)
 	} else {
-		entries = make([]fs.DirEntry, 0)
+		entries = make([]fs.DirEntry, 0, 100)
 	}
 
-	for offset < start+int64(f.dirEntry.fileSize) {
-		d, err := readDirEntry(f.fs.r, offset)
+	start := int64(f.dirEntry.lba) * int64(f.fs.pvd.logicalBlockSize)
+
+	for len(entries) < n || n <= 0 {
+		dirent, err := readDirEntry(f.fs.r, start+f.offset)
 		if err != nil {
 			return entries, err
 		}
 
-		if d.len == 0 {
+		if dirent.len == 0 {
 			break
 		}
 
-		entries = append(entries, d)
-		offset += int64(d.len)
+		entries = append(entries, dirent)
+		f.offset += int64(dirent.len)
+
+		if f.offset >= int64(f.dirEntry.fileSize) {
+			break
+		}
+	}
+
+	if n > 0 && len(entries) == 0 {
+		return nil, io.EOF
 	}
 
 	return entries, nil
@@ -561,7 +567,7 @@ func NewFS(readerAt io.ReaderAt, size int64) (*FS, error) {
 	}, nil
 }
 
-func (f *FS) walk(name string) (*dirEntry, error) {
+func (fsys *FS) walk(name string) (*dirEntry, error) {
 	pathComponents := strings.Split(name, "/")
 
 	// if pathComponents[0] == "." {
@@ -580,27 +586,27 @@ func (f *FS) walk(name string) (*dirEntry, error) {
 	// return dirent, nil
 
 	if len(pathComponents) == 1 && pathComponents[0] == "." {
-		return f.pvd.root, nil
+		return fsys.pvd.root, nil
 	} else {
-		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+		return nil, fs.ErrNotExist
 	}
 }
 
-func (f *FS) Open(name string) (fs.File, error) {
+func (fsys *FS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
 
-	dirent, err := f.walk(name)
+	dirent, err := fsys.walk(name)
 	if err != nil {
-		return nil, err
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
 
-	return &file{f, dirent}, nil
+	return &file{fsys, dirent, 0}, nil
 }
 
-func (f *FS) Close() error {
-	if c, ok := f.r.ReaderAt.(io.Closer); ok {
+func (fsys *FS) Close() error {
+	if c, ok := fsys.r.ReaderAt.(io.Closer); ok {
 		return c.Close()
 	}
 
@@ -616,13 +622,14 @@ func main() {
 
 	fname := os.Args[1]
 
-	f, err := Open(fname)
+	fsys, err := Open(fname)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
 
-	entries, err := fs.ReadDir(f, ".")
+	defer fsys.Close()
+
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		log.Fatal(err)
 	}
