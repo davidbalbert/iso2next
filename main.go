@@ -448,8 +448,13 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			break
 		}
 
-		entries = append(entries, dirent)
 		f.offset += int64(dirent.len)
+
+		if dirent.Name() == "." || dirent.Name() == ".." {
+			continue
+		}
+
+		entries = append(entries, dirent)
 
 		if f.offset >= int64(f.dirEntry.fileSize) {
 			break
@@ -606,16 +611,30 @@ func main() {
 	// 	log.Fatal(err)
 	// }
 
-	entries, err := fs.ReadDir(fsys, ".")
-	if err != nil {
-		log.Fatal(err)
-	}
+	// entries, err := fs.ReadDir(fsys, ".")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
 
-	for _, dirent := range entries {
-		if dirent.IsDir() {
-			log.Printf("%s/\n", dirent.Name())
-		} else {
-			log.Printf("%s\n", dirent.Name())
+	// for _, dirent := range entries {
+	// 	if dirent.IsDir() {
+	// 		log.Printf("%s/\n", dirent.Name())
+	// 	} else {
+	// 		log.Printf("%s\n", dirent.Name())
+	// 	}
+	// }
+
+	fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
+
+		if dirent.IsDir() {
+			fmt.Printf("%s/\n", path)
+		} else {
+			fmt.Printf("%s\n", path)
+		}
+
+		return nil
+	})
 }
