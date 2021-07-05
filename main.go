@@ -419,7 +419,17 @@ func readDirEntry(r *reader, offset int64) (*dirEntry, error) {
 }
 
 func (d *dirEntry) Name() string {
-	return d.name
+	if d.name == "\x00" {
+		return "."
+	} else if d.name == "\x01" {
+		return ".."
+	} else if strings.HasSuffix(d.name, ".;1") {
+		return d.name[:len(d.name)-3]
+	} else if strings.HasSuffix(d.name, ";1") {
+		return d.name[:len(d.name)-2]
+	} else {
+		return d.name
+	}
 }
 
 func (d *dirEntry) IsDir() bool {
@@ -480,9 +490,13 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 
 	start := int64(f.dirEntry.lba) * int64(f.fs.pvd.logicalBlockSize)
 	offset := start
-	entries := make([]fs.DirEntry, n)
 
-	fmt.Println(offset, f.dirEntry.fileSize)
+	var entries []fs.DirEntry
+	if n > 0 {
+		entries = make([]fs.DirEntry, n)
+	} else {
+		entries = make([]fs.DirEntry, 0)
+	}
 
 	for offset < start+int64(f.dirEntry.fileSize) {
 		d, err := readDirEntry(f.fs.r, offset)
@@ -534,22 +548,22 @@ func newFS(readerAt io.ReaderAt, size int64) (*FS, error) {
 }
 
 func (f *FS) walk(name string) (*dirEntry, error) {
-	// var offset int64 = 16 * sectBytes
+	pathComponents := strings.Split(name, "/")
 
-	// for {
-	// 	d, err := readDirEntry(f.r, offset)
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-
-	// 	if d.Name() == name {
-	// 		return d, nil
-	// 	}
-
-	// 	offset += d.len
+	// if pathComponents[0] == "." {
+	// 	pathComponents = pathComponents[1:]
 	// }
 
-	pathComponents := strings.Split(name, "/")
+	// dirent := f.pvd.root
+
+	// for _, component := range pathComponents {
+
+	// 	if !dirent.IsDir() {
+	// 		return nil, fmt.Errorf("%s is not a directory", component)
+	// 	}
+	// }
+
+	// return dirent, nil
 
 	if len(pathComponents) == 1 && pathComponents[0] == "." {
 		return f.pvd.root, nil
@@ -596,21 +610,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	newF, err := iso.Open(".")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer newF.Close()
-
-	fmt.Println("hmm")
-
-	dir := newF.(fs.ReadDirFile)
-	entries, err := dir.ReadDir(0)
+	entries, err := fs.ReadDir(iso, ".")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	for _, dirent := range entries {
-		log.Printf("%s\n", dirent.Name())
+		if dirent.IsDir() {
+			log.Printf("%s/\n", dirent.Name())
+		} else {
+			log.Printf("%s\n", dirent.Name())
+		}
 	}
 }
