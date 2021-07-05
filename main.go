@@ -5,8 +5,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
+	"time"
 )
 
 const kb = 1024
@@ -123,7 +125,7 @@ type vdPrimary struct {
 	// uses the little endian variants of path tables
 	pathTableLocation         uint32
 	optionalPathTableLocation uint32
-	// TODO: root directory record
+	rootDirEntry              *dirEntry
 }
 
 type vdSupplementary struct {
@@ -233,6 +235,11 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 		return nil, fmt.Errorf("error reading primary descriptor optional path table location: %w", err)
 	}
 
+	rootDirEntry, err := readDirEntry(r, offset+156)
+	if err != nil {
+		return nil, fmt.Errorf("error reading root directory entry: %w", err)
+	}
+
 	var fileStructureVersion uint8
 	r.Seek(offset+881, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &fileStructureVersion); err != nil {
@@ -254,6 +261,7 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 		pathTableSize,
 		pathTableLocation,
 		optionalPathTableLocation,
+		rootDirEntry,
 	}, nil
 }
 
@@ -340,6 +348,139 @@ func eachVolume(r *reader, fn func(vd vDescriptor) (stop bool)) error {
 	return nil
 }
 
+const (
+	flagDir uint8 = (1 << 1)
+)
+
+type dirEntry struct {
+	len      uint8
+	eaLen    uint8
+	lba      uint32
+	fileSize uint32
+	mode     fs.FileMode
+	name     string
+}
+
+func readDirEntry(r *reader, offset int64) (*dirEntry, error) {
+	var len uint8
+	r.Seek(offset, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &len); err != nil {
+		return nil, fmt.Errorf("error reading directory entry length: %w", err)
+	}
+
+	var eaLen uint8
+	if err := binary.Read(r, binary.LittleEndian, &eaLen); err != nil {
+		return nil, fmt.Errorf("error reading directory entry extended attribute length: %w", err)
+	}
+
+	var lba uint32
+	if err := binary.Read(r, binary.LittleEndian, &lba); err != nil {
+		return nil, fmt.Errorf("error reading directory entry logical block address: %w", err)
+	}
+
+	var fileSize uint32
+	r.Seek(offset+10, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &fileSize); err != nil {
+		return nil, fmt.Errorf("error reading file size: %w", err)
+	}
+
+	// todo: recording date and time
+	var flags uint8
+	r.Seek(offset+25, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
+		return nil, fmt.Errorf("error reading file flags: %w", err)
+	}
+
+	// mode todo:
+	// - files with multiple directory entries
+	// - extended attribute record (+ owner and group permissions)
+	// - "associated files" (?)
+
+	var mode fs.FileMode
+	if flags&flagDir != 0 {
+		mode = fs.ModeDir
+	} else {
+		mode = 0
+	}
+
+	var nameLen uint8
+	r.Seek(offset+32, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &nameLen); err != nil {
+		return nil, fmt.Errorf("error reading directory entry name length: %w", err)
+	}
+
+	name, err := readStr(r, offset+33, int(nameLen))
+	if err != nil {
+		return nil, fmt.Errorf("error reading file name: %w", err)
+	}
+
+	return &dirEntry{len, eaLen, lba, fileSize, mode, name}, nil
+}
+
+func (d *dirEntry) Name() string {
+	return d.name
+}
+
+func (d *dirEntry) IsDir() bool {
+	return d.mode.IsDir()
+}
+
+func (d *dirEntry) Type() fs.FileMode {
+	return d.mode
+}
+
+func (d *dirEntry) Mode() fs.FileMode {
+	return d.mode
+}
+
+func (d *dirEntry) ModTime() time.Time {
+	return time.Now()
+}
+
+func (d *dirEntry) Size() int64 {
+	return int64(d.fileSize)
+}
+
+func (d *dirEntry) Sys() interface{} {
+	return nil
+}
+
+func (d *dirEntry) Info() (fs.FileInfo, error) {
+	return d, nil
+}
+
+type FS struct {
+	r   *reader
+	pvd *vdPrimary
+}
+
+func newFS(readerAt io.ReaderAt, size int64) (*FS, error) {
+	r := newReader(readerAt, size)
+
+	var primary vDescriptor = nil
+	err := eachVolume(r, func(vd vDescriptor) (stop bool) {
+		if vd.vType() == vtPrimary {
+			primary = vd
+			return true
+		}
+
+		return false
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("error reading primary descriptor: %w", err)
+	}
+
+	if primary == nil {
+		return nil, fmt.Errorf("primary descriptor not found")
+	}
+
+	return &FS{
+		r:   r,
+		pvd: primary.(*vdPrimary),
+	}, nil
+}
+
 func main() {
 	log.SetFlags(0)
 
@@ -378,8 +519,10 @@ func main() {
 
 	p := primary.(*vdPrimary)
 
-	p.eachPathTableEntry(r, func(pathTableEntry *pathTableEntry) (stop bool) {
-		log.Printf("%s - %d\n", pathTableEntry.directoryId, pathTableEntry.location)
-		return false
-	})
+	fmt.Println(p.rootDirEntry)
+
+	// p.eachPathTableEntry(r, func(pathTableEntry *pathTableEntry) (stop bool) {
+	// 	log.Printf("%s - %d\n", pathTableEntry.directoryId, pathTableEntry.location)
+	// 	return false
+	// })
 }
