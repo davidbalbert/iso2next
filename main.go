@@ -266,64 +266,6 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 	}, nil
 }
 
-type pathTableEntry struct {
-	location    uint32
-	directoryId string
-	size        int64
-}
-
-func readPathTableEntry(r *reader, offset int64) (*pathTableEntry, error) {
-	var length uint8
-	r.Seek(offset, io.SeekStart)
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
-		return nil, fmt.Errorf("error reading directory identifier length: %w", err)
-	}
-
-	var location uint32
-	r.Seek(offset+2, io.SeekStart)
-	if err := binary.Read(r, binary.LittleEndian, &location); err != nil {
-		return nil, fmt.Errorf("error reading path table entry location: %w", err)
-	}
-
-	directoryId, err := readStr(r, offset+8, int(length))
-	if err != nil {
-		return nil, fmt.Errorf("error reading path table entry directory id: %w", err)
-	}
-
-	var size int64
-	size = 8 + int64(length)
-	if length%2 == 1 {
-		size += 1
-	}
-
-	return &pathTableEntry{location, directoryId, size}, nil
-}
-
-func (vd *vdPrimary) eachPathTableEntry(r *reader, fn func(entry *pathTableEntry) (stop bool)) error {
-	start := int64(vd.pathTableLocation) * int64(vd.logicalBlockSize)
-	offset := start
-
-	for {
-		pte, err := readPathTableEntry(r, offset)
-		if err != nil {
-			log.Fatalf("error reading path table entry: %v\n", err)
-		}
-
-		stop := fn(pte)
-		if stop {
-			break
-		}
-
-		offset += pte.size
-
-		if offset >= start+int64(vd.pathTableSize) {
-			break
-		}
-	}
-
-	return nil
-}
-
 func eachVolume(r *reader, fn func(vd vDescriptor) (stop bool)) error {
 	var offset int64 = 16 * sectBytes
 
