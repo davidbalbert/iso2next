@@ -300,8 +300,62 @@ type dirEntry struct {
 	eaLen    uint8
 	lba      uint32
 	fileSize uint32
+	ctime    time.Time
 	mode     fs.FileMode
 	name     string
+}
+
+func readTime(r *reader, offset int64) (time.Time, error) {
+	r.Seek(offset+18, io.SeekStart)
+
+	var year, month, day, hour, minute, second uint8
+	var tz int8
+
+	if err := binary.Read(r, binary.LittleEndian, &year); err != nil {
+		return time.Time{}, fmt.Errorf("error reading year: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &month); err != nil {
+		return time.Time{}, fmt.Errorf("error reading month: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &day); err != nil {
+		return time.Time{}, fmt.Errorf("error reading day: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &hour); err != nil {
+		return time.Time{}, fmt.Errorf("error reading hour: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &minute); err != nil {
+		return time.Time{}, fmt.Errorf("error reading minute: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &second); err != nil {
+		return time.Time{}, fmt.Errorf("error reading second: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &tz); err != nil {
+		return time.Time{}, fmt.Errorf("error reading time zone offset: %w", err)
+	}
+
+	var tzName string
+	tzSeconds := 15 * 60 * int(tz)
+	if tzSeconds == 0 {
+		tzName = "UTC"
+	} else if tzSeconds > 0 && tzSeconds%3600 == 0 {
+		tzName = fmt.Sprintf("UTC+%d", tzSeconds/3600)
+	} else if tzSeconds > 0 {
+		tzName = fmt.Sprintf("UTC+%d:%0d", tzSeconds/3600, tzSeconds/60)
+	} else if tzSeconds < 0 && tzSeconds%3600 == 0 {
+		tzName = fmt.Sprintf("UTC-%d", -tzSeconds/3600)
+	} else {
+		tzName = fmt.Sprintf("UTC-%d:%0d", -tzSeconds/3600, -tzSeconds/60)
+	}
+
+	location := time.FixedZone(tzName, tzSeconds)
+
+	return time.Date(1900+int(year), time.Month(month), int(day), int(hour), int(minute), int(second), 0, location), nil
 }
 
 func readDirEntry(r *reader, offset int64) (*dirEntry, error) {
@@ -328,6 +382,11 @@ func readDirEntry(r *reader, offset int64) (*dirEntry, error) {
 	}
 
 	// todo: recording date and time
+	ctime, err := readTime(r, offset)
+	if err != nil {
+		return nil, fmt.Errorf("error reading directory entry created at: %w", err)
+	}
+
 	var flags uint8
 	r.Seek(offset+25, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
@@ -357,7 +416,7 @@ func readDirEntry(r *reader, offset int64) (*dirEntry, error) {
 		return nil, fmt.Errorf("error reading file name: %w", err)
 	}
 
-	return &dirEntry{len, eaLen, lba, fileSize, mode, name}, nil
+	return &dirEntry{len, eaLen, lba, fileSize, ctime, mode, name}, nil
 }
 
 func (d *dirEntry) Name() string {
@@ -387,7 +446,7 @@ func (d *dirEntry) Mode() fs.FileMode {
 }
 
 func (d *dirEntry) ModTime() time.Time {
-	return time.Now()
+	return d.ctime
 }
 
 func (d *dirEntry) Size() int64 {
@@ -639,24 +698,29 @@ func main() {
 	// 	}
 	// }
 
-	// fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
-	// 	if err != nil {
-	// 		return err
-	// 	}
+	fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 
-	// 	if dirent.IsDir() {
-	// 		fmt.Printf("%s/\n", path)
-	// 	} else {
-	// 		fmt.Printf("%s\n", path)
-	// 	}
+		info, err := dirent.Info()
+		if err != nil {
+			return err
+		}
 
-	// 	return nil
-	// })
+		if dirent.IsDir() {
+			fmt.Printf("%s\t%s/\n", info.ModTime(), path)
+		} else {
+			fmt.Printf("%s\t%s\n", info.ModTime(), path)
+		}
 
-	buf, err := fs.ReadFile(fsys, "NEXTLIBR/DOCUMENT/NEXTSTEP/1993FALL/ADVANCED.RTF/TXT.RTF")
-	if err != nil {
-		log.Fatal(err)
-	}
+		return nil
+	})
 
-	fmt.Println(string(buf))
+	// buf, err := fs.ReadFile(fsys, "NEXTLIBR/DOCUMENT/NEXTSTEP/1993FALL/ADVANCED.RTF/TXT.RTF")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// fmt.Println(string(buf))
 }
