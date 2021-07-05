@@ -520,7 +520,21 @@ type FS struct {
 	pvd *vdPrimary
 }
 
-func newFS(readerAt io.ReaderAt, size int64) (*FS, error) {
+func Open(name string) (*FS, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewFS(f, info.Size())
+}
+
+func NewFS(readerAt io.ReaderAt, size int64) (*FS, error) {
 	r := newReader(readerAt, size)
 
 	var primary vDescriptor = nil
@@ -585,6 +599,14 @@ func (f *FS) Open(name string) (fs.File, error) {
 	return &file{f, dirent}, nil
 }
 
+func (f *FS) Close() error {
+	if c, ok := f.r.ReaderAt.(io.Closer); ok {
+		return c.Close()
+	}
+
+	return nil
+}
+
 func main() {
 	log.SetFlags(0)
 
@@ -594,23 +616,13 @@ func main() {
 
 	fname := os.Args[1]
 
-	f, err := os.Open(fname)
+	f, err := Open(fname)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer f.Close()
 
-	info, err := f.Stat()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	iso, err := newFS(f, info.Size())
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	entries, err := fs.ReadDir(iso, ".")
+	entries, err := fs.ReadDir(f, ".")
 	if err != nil {
 		log.Fatal(err)
 	}
