@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -125,7 +126,7 @@ type vdPrimary struct {
 	// uses the little endian variants of path tables
 	pathTableLocation         uint32
 	optionalPathTableLocation uint32
-	rootDirEntry              *dirEntry
+	root                      *dirEntry
 }
 
 type vdSupplementary struct {
@@ -449,6 +450,57 @@ func (d *dirEntry) Info() (fs.FileInfo, error) {
 	return d, nil
 }
 
+type file struct {
+	fs *FS
+	*dirEntry
+}
+
+func (f *file) Stat() (fs.FileInfo, error) {
+	return f.dirEntry, nil
+}
+
+func (f *file) Read(p []byte) (int, error) {
+	if f.dirEntry.IsDir() {
+		return 0, fmt.Errorf("can't call Read on a directory")
+	}
+
+	return 0, fmt.Errorf("not implemented")
+}
+
+func (f *file) Close() error {
+	return nil
+}
+
+func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
+	if !f.dirEntry.IsDir() {
+		return nil, fmt.Errorf("can't call ReadDir on a file")
+	}
+
+	// todo: n
+
+	start := int64(f.dirEntry.lba) * int64(f.fs.pvd.logicalBlockSize)
+	offset := start
+	entries := make([]fs.DirEntry, n)
+
+	fmt.Println(offset, f.dirEntry.fileSize)
+
+	for offset < start+int64(f.dirEntry.fileSize) {
+		d, err := readDirEntry(f.fs.r, offset)
+		if err != nil {
+			return entries, err
+		}
+
+		if d.len == 0 {
+			break
+		}
+
+		entries = append(entries, d)
+		offset += int64(d.len)
+	}
+
+	return entries, nil
+}
+
 type FS struct {
 	r   *reader
 	pvd *vdPrimary
@@ -481,6 +533,44 @@ func newFS(readerAt io.ReaderAt, size int64) (*FS, error) {
 	}, nil
 }
 
+func (f *FS) walk(name string) (*dirEntry, error) {
+	// var offset int64 = 16 * sectBytes
+
+	// for {
+	// 	d, err := readDirEntry(f.r, offset)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+
+	// 	if d.Name() == name {
+	// 		return d, nil
+	// 	}
+
+	// 	offset += d.len
+	// }
+
+	pathComponents := strings.Split(name, "/")
+
+	if len(pathComponents) == 1 && pathComponents[0] == "." {
+		return f.pvd.root, nil
+	} else {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+}
+
+func (f *FS) Open(name string) (fs.File, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+
+	dirent, err := f.walk(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return &file{f, dirent}, nil
+}
+
 func main() {
 	log.SetFlags(0)
 
@@ -501,28 +591,26 @@ func main() {
 		log.Fatal(err)
 	}
 
-	r := newReader(f, info.Size())
-
-	var primary vDescriptor = nil
-	err = eachVolume(r, func(vd vDescriptor) (stop bool) {
-		if vd.vType() == vtPrimary {
-			primary = vd
-			return true
-		}
-
-		return false
-	})
-
+	iso, err := newFS(f, info.Size())
 	if err != nil {
-		log.Fatalf("error reading %s: %v\n", fname, err)
+		log.Fatal(err)
 	}
 
-	p := primary.(*vdPrimary)
+	newF, err := iso.Open(".")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer newF.Close()
 
-	fmt.Println(p.rootDirEntry)
+	fmt.Println("hmm")
 
-	// p.eachPathTableEntry(r, func(pathTableEntry *pathTableEntry) (stop bool) {
-	// 	log.Printf("%s - %d\n", pathTableEntry.directoryId, pathTableEntry.location)
-	// 	return false
-	// })
+	dir := newF.(fs.ReadDirFile)
+	entries, err := dir.ReadDir(0)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, dirent := range entries {
+		log.Printf("%s\n", dirent.Name())
+	}
 }
