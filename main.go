@@ -412,12 +412,27 @@ func (f *file) Stat() (fs.FileInfo, error) {
 	return f.dirEntry, nil
 }
 
+// returns first byte of the file in the file system
+func (f *file) start() int64 {
+	return int64(f.dirEntry.lba) * int64(f.fs.pvd.logicalBlockSize)
+}
+
 func (f *file) Read(p []byte) (int, error) {
 	if f.dirEntry.IsDir() {
 		return 0, fmt.Errorf("can't call Read on a directory")
 	}
 
-	return 0, fmt.Errorf("not implemented")
+	if len(p) == 0 {
+		return 0, nil
+	} else if f.offset >= f.dirEntry.Size() {
+		return 0, io.EOF
+	}
+
+	start := f.start()
+
+	n, err := f.fs.r.ReadAt(p, start+f.offset)
+	f.offset += int64(n)
+	return n, err
 }
 
 func (f *file) Close() error {
@@ -436,7 +451,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 		entries = make([]fs.DirEntry, 0, 100)
 	}
 
-	start := int64(f.dirEntry.lba) * int64(f.fs.pvd.logicalBlockSize)
+	start := f.start()
 
 	for len(entries) < n || n <= 0 {
 		dirent, err := readDirEntry(f.fs.r, start+f.offset)
@@ -624,17 +639,24 @@ func main() {
 	// 	}
 	// }
 
-	fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+	// fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
+	// 	if err != nil {
+	// 		return err
+	// 	}
 
-		if dirent.IsDir() {
-			fmt.Printf("%s/\n", path)
-		} else {
-			fmt.Printf("%s\n", path)
-		}
+	// 	if dirent.IsDir() {
+	// 		fmt.Printf("%s/\n", path)
+	// 	} else {
+	// 		fmt.Printf("%s\n", path)
+	// 	}
 
-		return nil
-	})
+	// 	return nil
+	// })
+
+	buf, err := fs.ReadFile(fsys, "NEXTLIBR/DOCUMENT/NEXTSTEP/1993FALL/ADVANCED.RTF/TXT.RTF")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(string(buf))
 }
