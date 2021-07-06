@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 const kb = 1024
@@ -57,16 +58,53 @@ func (r *reader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func readStr(r *reader, offset int64, n int) (string, error) {
+func readBytes(r *reader, offset int64, n int) ([]byte, error) {
 	buf := make([]byte, n)
 
 	if _, err := r.ReadAt(buf, offset); err != nil {
-		return "", fmt.Errorf("error reading strD: %w", err)
+		return nil, fmt.Errorf("error reading bytes: %w", err)
+	}
+
+	return buf, nil
+}
+
+func readString(r *reader, offset int64, n int) (string, error) {
+	buf, err := readBytes(r, offset, n)
+	if err != nil {
+		return "", err
 	}
 
 	buf = bytes.TrimRight(buf, " ")
 
 	return string(buf), nil
+}
+
+func readStringJoliet(r *reader, offset int64, n int) (string, error) {
+	buf, err := readBytes(r, offset, n)
+	if err != nil {
+		return "", err
+	}
+
+	if eq(buf, []byte{0x00}) || eq(buf, []byte{0x01}) {
+		return string(buf), nil
+	}
+
+	buf = bytes.TrimRight(buf, "\x00")
+
+	if len(buf)%2 == 1 {
+		return "", fmt.Errorf("odd length UCS-2 string")
+	}
+
+	br := bytes.NewReader(buf)
+
+	encoded := make([]uint16, len(buf)/2)
+	if err := binary.Read(br, binary.BigEndian, &encoded); err != nil {
+		return "", err
+	}
+
+	runes := utf16.Decode(encoded)
+
+	return string(runes), nil
 }
 
 type vType uint8
@@ -77,6 +115,13 @@ const (
 	vtSupplementary
 	vtPartition
 	vtTerminator = 255
+)
+
+type vVersion byte
+
+const (
+	vvSupplementary vVersion = 1
+	vvEnhanced      vVersion = 2
 )
 
 type vDescriptor interface {
@@ -116,29 +161,77 @@ type vdBoot struct {
 
 type vdPrimary struct {
 	vdBase
-	systemId             string
-	volumeId             string
-	volumeSpaceSize      uint32
-	volumeSetSize        uint16
-	volumeSequenceNumber uint16
-	logicalBlockSize     uint16
-	pathTableSize        uint32
-	// uses the little endian variants of path tables
-	pathTableLocation         uint32
-	optionalPathTableLocation uint32
-	root                      *dirEntry
+	logicalBlockSize uint16
+	root             *dirEntry
 }
 
 type vdSupplementary struct {
 	vdBase
+	version          vVersion
+	flags            byte
+	escapeSequences  []byte
+	logicalBlockSize uint16
+	root             *dirEntry
 }
 
 type vdPartition struct {
 	vdBase
 }
 
+type vdTerminator struct {
+	vdBase
+}
+
+func chunk(b []byte, n int) [][]byte {
+	var chunks [][]byte
+
+	for len(b) > n {
+		chunks = append(chunks, b[:n])
+		b = b[n:]
+	}
+
+	if len(b) > 0 {
+		chunks = append(chunks, b)
+	}
+
+	return chunks
+}
+
+func eq(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (vd *vdSupplementary) isJoliet() bool {
+	if vd.version != vvSupplementary {
+		return false
+	}
+
+	if vd.flags&0x01 != 0 {
+		return false
+	}
+
+	chunkedSequences := chunk(vd.escapeSequences, 3)
+	for _, seq := range chunkedSequences {
+		if eq(seq, []byte{0x25, 0x2f, 0x40}) || eq(seq, []byte{0x25, 0x2f, 0x43}) || eq(seq, []byte{0x25, 0x2f, 0x45}) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func readVDescriptor(r *reader, offset int64) (vDescriptor, error) {
-	id, err := readStr(r, offset+1, 5)
+	id, err := readString(r, offset+1, 5)
 	if err != nil {
 		return nil, fmt.Errorf("error reading volume identifier: %w", err)
 	}
@@ -164,53 +257,25 @@ func readVDescriptor(r *reader, offset int64) (vDescriptor, error) {
 	case vtPrimary:
 		return readVdPrimary(r, offset)
 	case vtSupplementary:
-		return &vdSupplementary{vd}, nil
+		return readVdSupplementary(r, offset)
 	case vtPartition:
 		return &vdPartition{vd}, nil
+	case vtTerminator:
+		return &vdTerminator{vd}, nil
 	default:
 		return nil, fmt.Errorf("invalid volume type: %d", vtype)
 	}
 }
 
 func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
-	buf := make([]byte, 1)
-
-	var version uint8
+	var version byte
 	r.Seek(offset+6, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
 		return nil, fmt.Errorf("error reading primary descriptor: %w", err)
 	}
 
 	if version != 0x01 {
-		return nil, fmt.Errorf("invalid primary descriptor version: %d", buf[0])
-	}
-
-	systemId, err := readStr(r, offset+8, 32)
-	if err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor system id: %w", err)
-	}
-
-	volumeId, err := readStr(r, offset+40, 32)
-	if err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor volume id: %w", err)
-	}
-
-	var volumeSpaceSize uint32
-	r.Seek(offset+80, io.SeekStart)
-	if err := binary.Read(r, binary.LittleEndian, &volumeSpaceSize); err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor volume space size: %w", err)
-	}
-
-	var volumeSetSize uint16
-	r.Seek(offset+120, io.SeekStart)
-	if err := binary.Read(r, binary.LittleEndian, &volumeSetSize); err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor volume set size: %w", err)
-	}
-
-	var volumeSequenceNumber uint16
-	r.Seek(offset+124, io.SeekStart)
-	if err := binary.Read(r, binary.LittleEndian, &volumeSequenceNumber); err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor volume sequence number: %w", err)
+		return nil, fmt.Errorf("invalid primary descriptor version: %d", version)
 	}
 
 	var logicalBlockSize uint16
@@ -219,29 +284,12 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 		return nil, fmt.Errorf("error reading primary descriptor logical block size: %w", err)
 	}
 
-	var pathTableSize uint32
-	r.Seek(offset+132, io.SeekStart)
-	if err := binary.Read(r, binary.LittleEndian, &pathTableSize); err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor path table size: %w", err)
-	}
-
-	var pathTableLocation uint32
-	r.Seek(offset+140, io.SeekStart)
-	if err := binary.Read(r, binary.LittleEndian, &pathTableLocation); err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor path table location: %w", err)
-	}
-
-	var optionalPathTableLocation uint32
-	if err := binary.Read(r, binary.LittleEndian, &optionalPathTableLocation); err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor optional path table location: %w", err)
-	}
-
-	rootDirEntry, err := readDirEntry(r, offset+156)
+	rootDirEntry, err := readDirEntry(r, offset+156, false)
 	if err != nil {
 		return nil, fmt.Errorf("error reading root directory entry: %w", err)
 	}
 
-	var fileStructureVersion uint8
+	var fileStructureVersion byte
 	r.Seek(offset+881, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &fileStructureVersion); err != nil {
 		return nil, fmt.Errorf("error reading primary descriptor file structure version: %w", err)
@@ -253,20 +301,60 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 
 	return &vdPrimary{
 		vdBase{vType(vtPrimary)},
-		systemId,
-		volumeId,
-		volumeSpaceSize,
-		volumeSetSize,
-		volumeSequenceNumber,
 		logicalBlockSize,
-		pathTableSize,
-		pathTableLocation,
-		optionalPathTableLocation,
 		rootDirEntry,
 	}, nil
 }
 
-func eachVolume(r *reader, fn func(vd vDescriptor) (stop bool)) error {
+func readVdSupplementary(r *reader, offset int64) (*vdSupplementary, error) {
+	var version vVersion
+	r.Seek(offset+6, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
+		return nil, fmt.Errorf("error reading supplemtary descriptor version: %w", err)
+	}
+
+	var flags byte
+	if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
+		return nil, fmt.Errorf("error reading supplemtary descriptor flags: %w", err)
+	}
+
+	escapeSequences, err := readBytes(r, offset+88, 32)
+	if err != nil {
+		return nil, fmt.Errorf("error reading supplementary descriptor escape sequences: %w", err)
+	}
+
+	var logicalBlockSize uint16
+	r.Seek(offset+128, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &logicalBlockSize); err != nil {
+		return nil, fmt.Errorf("error reading supplementary descriptor logical block size: %w", err)
+	}
+
+	rootDirEntry, err := readDirEntry(r, offset+156, false)
+	if err != nil {
+		return nil, fmt.Errorf("error reading supplementary root directory entry: %w", err)
+	}
+
+	var fileStructureVersion byte
+	r.Seek(offset+881, io.SeekStart)
+	if err := binary.Read(r, binary.LittleEndian, &fileStructureVersion); err != nil {
+		return nil, fmt.Errorf("error reading supplementary descriptor file structure version: %w", err)
+	}
+
+	if fileStructureVersion != 0x01 {
+		return nil, fmt.Errorf("invalid supplementary descriptor file structure version: %d", fileStructureVersion)
+	}
+
+	return &vdSupplementary{
+		vdBase{vType(vtSupplementary)},
+		version,
+		flags,
+		escapeSequences,
+		logicalBlockSize,
+		rootDirEntry,
+	}, nil
+}
+
+func eachVolumeDescriptor(r *reader, fn func(vd vDescriptor) (stop bool)) error {
 	var offset int64 = 16 * sectBytes
 
 	for {
@@ -358,7 +446,7 @@ func readTime(r *reader, offset int64) (time.Time, error) {
 	return time.Date(1900+int(year), time.Month(month), int(day), int(hour), int(minute), int(second), 0, location), nil
 }
 
-func readDirEntry(r *reader, offset int64) (*dirEntry, error) {
+func readDirEntry(r *reader, offset int64, joliet bool) (*dirEntry, error) {
 	var len uint8
 	r.Seek(offset, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &len); err != nil {
@@ -411,7 +499,12 @@ func readDirEntry(r *reader, offset int64) (*dirEntry, error) {
 		return nil, fmt.Errorf("error reading directory entry name length: %w", err)
 	}
 
-	name, err := readStr(r, offset+33, int(nameLen))
+	var name string
+	if joliet {
+		name, err = readStringJoliet(r, offset+33, int(nameLen))
+	} else {
+		name, err = readString(r, offset+33, int(nameLen))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("error reading file name: %w", err)
 	}
@@ -513,7 +606,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 	start := f.start()
 
 	for len(entries) < n || n <= 0 {
-		dirent, err := readDirEntry(f.fs.r, start+f.offset)
+		dirent, err := readDirEntry(f.fs.r, start+f.offset, f.fs.isJoliet())
 		if err != nil {
 			return entries, err
 		}
@@ -543,8 +636,9 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 }
 
 type FS struct {
-	r   *reader
-	pvd *vdPrimary
+	r      *reader
+	pvd    *vdPrimary
+	joliet *vdSupplementary
 }
 
 func Open(name string) (*FS, error) {
@@ -564,11 +658,17 @@ func Open(name string) (*FS, error) {
 func NewFS(readerAt io.ReaderAt, size int64) (*FS, error) {
 	r := newReader(readerAt, size)
 
-	var primary vDescriptor = nil
-	err := eachVolume(r, func(vd vDescriptor) (stop bool) {
+	var primary *vdPrimary = nil
+	var joliet *vdSupplementary = nil
+	err := eachVolumeDescriptor(r, func(vd vDescriptor) (stop bool) {
 		if vd.vType() == vtPrimary {
-			primary = vd
-			return true
+			primary = vd.(*vdPrimary)
+		} else if vd.vType() == vtSupplementary {
+			svd := vd.(*vdSupplementary)
+
+			if svd.isJoliet() {
+				joliet = svd
+			}
 		}
 
 		return false
@@ -583,8 +683,9 @@ func NewFS(readerAt io.ReaderAt, size int64) (*FS, error) {
 	}
 
 	return &FS{
-		r:   r,
-		pvd: primary.(*vdPrimary),
+		r:      r,
+		pvd:    primary,
+		joliet: joliet,
 	}, nil
 }
 
@@ -597,6 +698,18 @@ func contains(a []string, s string) bool {
 	return false
 }
 
+func (fsys *FS) isJoliet() bool {
+	return fsys.joliet != nil
+}
+
+func (fsys *FS) root() *dirEntry {
+	if fsys.joliet != nil {
+		return fsys.joliet.root
+	} else {
+		return fsys.pvd.root
+	}
+}
+
 func (fsys *FS) walk(name string) (*dirEntry, error) {
 	pathComponents := strings.Split(name, "/")
 
@@ -604,7 +717,7 @@ func (fsys *FS) walk(name string) (*dirEntry, error) {
 		pathComponents = pathComponents[1:]
 	}
 
-	dirent := fsys.pvd.root
+	dirent := fsys.root()
 
 	for i, component := range pathComponents {
 		last := i == len(pathComponents)-1
