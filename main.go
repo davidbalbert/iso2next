@@ -18,21 +18,27 @@ import (
 const kb = 1024
 const sectSize = 2 * kb
 
-type reader struct {
+type ReadReadAtSeeker interface {
+	io.Reader
+	io.ReaderAt
+	io.Seeker
+}
+
+type readerAtReader struct {
 	io.ReaderAt
 	size   int64
 	offset int64
 }
 
-func newReader(r io.ReaderAt, size int64) *reader {
-	return &reader{
+func newReaderAtReader(r io.ReaderAt, size int64) *readerAtReader {
+	return &readerAtReader{
 		ReaderAt: r,
 		size:     size,
 		offset:   0,
 	}
 }
 
-func (r *reader) Seek(offset int64, whence int) (int64, error) {
+func (r *readerAtReader) Seek(offset int64, whence int) (int64, error) {
 	var newOffset int64
 	switch whence {
 	case io.SeekStart:
@@ -53,14 +59,14 @@ func (r *reader) Seek(offset int64, whence int) (int64, error) {
 	return newOffset, nil
 }
 
-func (r *reader) Read(p []byte) (n int, err error) {
+func (r *readerAtReader) Read(p []byte) (n int, err error) {
 	n, err = r.ReadAt(p, r.offset)
 	r.offset += int64(n)
 
 	return n, err
 }
 
-func readBytes(r *reader, offset int64, n int) ([]byte, error) {
+func readBytes(r ReadReadAtSeeker, offset int64, n int) ([]byte, error) {
 	buf := make([]byte, n)
 
 	if _, err := r.ReadAt(buf, offset); err != nil {
@@ -70,7 +76,7 @@ func readBytes(r *reader, offset int64, n int) ([]byte, error) {
 	return buf, nil
 }
 
-func readString(r *reader, offset int64, n int) (string, error) {
+func readString(r ReadReadAtSeeker, offset int64, n int) (string, error) {
 	buf, err := readBytes(r, offset, n)
 	if err != nil {
 		return "", err
@@ -81,7 +87,7 @@ func readString(r *reader, offset int64, n int) (string, error) {
 	return string(buf), nil
 }
 
-func readStringJoliet(r *reader, offset int64, n int) (string, error) {
+func readStringJoliet(r ReadReadAtSeeker, offset int64, n int) (string, error) {
 	buf, err := readBytes(r, offset, n)
 	if err != nil {
 		return "", err
@@ -232,7 +238,7 @@ func (vd *vdSupplementary) isJoliet() bool {
 	return false
 }
 
-func readVDescriptor(r *reader, offset int64) (vDescriptor, error) {
+func readVDescriptor(r ReadReadAtSeeker, offset int64) (vDescriptor, error) {
 	id, err := readString(r, offset+1, 5)
 	if err != nil {
 		return nil, fmt.Errorf("error reading volume identifier: %w", err)
@@ -269,7 +275,7 @@ func readVDescriptor(r *reader, offset int64) (vDescriptor, error) {
 	}
 }
 
-func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
+func readVdPrimary(r ReadReadAtSeeker, offset int64) (*vdPrimary, error) {
 	var version byte
 	r.Seek(offset+6, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
@@ -308,7 +314,7 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 	}, nil
 }
 
-func readVdSupplementary(r *reader, offset int64) (*vdSupplementary, error) {
+func readVdSupplementary(r ReadReadAtSeeker, offset int64) (*vdSupplementary, error) {
 	var version vVersion
 	r.Seek(offset+6, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
@@ -356,7 +362,7 @@ func readVdSupplementary(r *reader, offset int64) (*vdSupplementary, error) {
 	}, nil
 }
 
-func eachVolumeDescriptor(r *reader, fn func(vd vDescriptor) (stop bool)) error {
+func eachVolumeDescriptor(r ReadReadAtSeeker, fn func(vd vDescriptor) (stop bool)) error {
 	var offset int64 = 16 * sectSize
 
 	for {
@@ -395,7 +401,7 @@ type dirEntry struct {
 	name     string
 }
 
-func readTime(r *reader, offset int64) (time.Time, error) {
+func readTime(r ReadReadAtSeeker, offset int64) (time.Time, error) {
 	r.Seek(offset+18, io.SeekStart)
 
 	var year, month, day, hour, minute, second uint8
@@ -448,7 +454,7 @@ func readTime(r *reader, offset int64) (time.Time, error) {
 	return time.Date(1900+int(year), time.Month(month), int(day), int(hour), int(minute), int(second), 0, location), nil
 }
 
-func readDirEntry(r *reader, offset int64, joliet bool) (*dirEntry, error) {
+func readDirEntry(r ReadReadAtSeeker, offset int64, joliet bool) (*dirEntry, error) {
 	var len uint8
 	r.Seek(offset, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &len); err != nil {
@@ -658,7 +664,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 }
 
 type FS struct {
-	r      *reader
+	r      ReadReadAtSeeker
 	pvd    *vdPrimary
 	joliet *vdSupplementary
 }
@@ -669,17 +675,10 @@ func Open(name string) (*FS, error) {
 		return nil, err
 	}
 
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	return NewFS(f, info.Size())
+	return NewFS(f)
 }
 
-func NewFS(readerAt io.ReaderAt, size int64) (*FS, error) {
-	r := newReader(readerAt, size)
-
+func NewFS(r ReadReadAtSeeker) (*FS, error) {
 	var primary *vdPrimary = nil
 	var joliet *vdSupplementary = nil
 	err := eachVolumeDescriptor(r, func(vd vDescriptor) (stop bool) {
@@ -783,7 +782,7 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 }
 
 func (fsys *FS) Close() error {
-	if c, ok := fsys.r.ReaderAt.(io.Closer); ok {
+	if c, ok := fsys.r.(io.Closer); ok {
 		return c.Close()
 	}
 
@@ -799,44 +798,22 @@ func main() {
 
 	fname := os.Args[1]
 
+	// fsys, err := Open(fname)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer fsys.Close()
+
 	r, err := mmap.Open(fname)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer r.Close()
 
-	fsys, err := NewFS(r, int64(r.Len()))
+	fsys, err := NewFS(newReaderAtReader(r, int64(r.Len())))
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// f, err := fsys.Open(".")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// dir, ok := f.(fs.ReadDirFile)
-	// if !ok {
-	// 	log.Fatal("not a directory")
-	// }
-
-	// entries, err := dir.ReadDir(-1)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// entries, err := fs.ReadDir(fsys, ".")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// for _, dirent := range entries {
-	// 	if dirent.IsDir() {
-	// 		log.Printf("%s/\n", dirent.Name())
-	// 	} else {
-	// 		log.Printf("%s\n", dirent.Name())
-	// 	}
-	// }
 
 	err = fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
 		if err != nil {
@@ -859,11 +836,4 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// 	buf, err := fs.ReadFile(fsys, "bin/awk")
-	// 	if err != nil {
-	// 		log.Fatal(err)
-	// 	}
-	//
-	// 	fmt.Println(string(buf))
 }
