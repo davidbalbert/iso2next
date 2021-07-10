@@ -11,10 +11,12 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"golang.org/x/exp/mmap"
 )
 
 const kb = 1024
-const sectBytes = 2 * kb
+const sectSize = 2 * kb
 
 type reader struct {
 	io.ReaderAt
@@ -92,7 +94,6 @@ func readStringJoliet(r *reader, offset int64, n int) (string, error) {
 	buf = bytes.TrimRight(buf, "\x00")
 
 	if len(buf)%2 == 1 {
-		fmt.Println(n)
 		return "", fmt.Errorf("odd length UCS-2 string: %v", buf)
 	}
 
@@ -285,7 +286,7 @@ func readVdPrimary(r *reader, offset int64) (*vdPrimary, error) {
 		return nil, fmt.Errorf("error reading primary descriptor logical block size: %w", err)
 	}
 
-	rootDirEntry, _, err := readDirEntry(r, offset+156, false)
+	rootDirEntry, err := readDirEntry(r, offset+156, false)
 	if err != nil {
 		return nil, fmt.Errorf("error reading root directory entry: %w", err)
 	}
@@ -330,7 +331,7 @@ func readVdSupplementary(r *reader, offset int64) (*vdSupplementary, error) {
 		return nil, fmt.Errorf("error reading supplementary descriptor logical block size: %w", err)
 	}
 
-	rootDirEntry, _, err := readDirEntry(r, offset+156, false)
+	rootDirEntry, err := readDirEntry(r, offset+156, false)
 	if err != nil {
 		return nil, fmt.Errorf("error reading supplementary root directory entry: %w", err)
 	}
@@ -356,7 +357,7 @@ func readVdSupplementary(r *reader, offset int64) (*vdSupplementary, error) {
 }
 
 func eachVolumeDescriptor(r *reader, fn func(vd vDescriptor) (stop bool)) error {
-	var offset int64 = 16 * sectBytes
+	var offset int64 = 16 * sectSize
 
 	for {
 		vd, err := readVDescriptor(r, offset)
@@ -374,7 +375,7 @@ func eachVolumeDescriptor(r *reader, fn func(vd vDescriptor) (stop bool)) error 
 			break
 		}
 
-		offset += sectBytes
+		offset += sectSize
 	}
 
 	return nil
@@ -447,56 +448,39 @@ func readTime(r *reader, offset int64) (time.Time, error) {
 	return time.Date(1900+int(year), time.Month(month), int(day), int(hour), int(minute), int(second), 0, location), nil
 }
 
-func readDirEntry(r *reader, offset int64, joliet bool) (*dirEntry, int, error) {
-	skipped := 0
-	for {
-		var pad byte
-		r.Seek(offset+int64(skipped), io.SeekStart)
-		if err := binary.Read(r, binary.LittleEndian, &pad); err != nil {
-			return nil, 0, fmt.Errorf("error reading directory entry sector padding: %w", err)
-		}
-
-		if pad != 0x00 {
-			break
-		}
-
-		skipped += 1
-	}
-
-	offset += int64(skipped)
-
+func readDirEntry(r *reader, offset int64, joliet bool) (*dirEntry, error) {
 	var len uint8
 	r.Seek(offset, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &len); err != nil {
-		return nil, 0, fmt.Errorf("error reading directory entry length: %w", err)
+		return nil, fmt.Errorf("error reading directory entry length: %w", err)
 	}
 
 	var eaLen uint8
 	if err := binary.Read(r, binary.LittleEndian, &eaLen); err != nil {
-		return nil, 0, fmt.Errorf("error reading directory entry extended attribute length: %w", err)
+		return nil, fmt.Errorf("error reading directory entry extended attribute length: %w", err)
 	}
 
 	var lba uint32
 	if err := binary.Read(r, binary.LittleEndian, &lba); err != nil {
-		return nil, 0, fmt.Errorf("error reading directory entry logical block address: %w", err)
+		return nil, fmt.Errorf("error reading directory entry logical block address: %w", err)
 	}
 
 	var fileSize uint32
 	r.Seek(offset+10, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &fileSize); err != nil {
-		return nil, 0, fmt.Errorf("error reading file size: %w", err)
+		return nil, fmt.Errorf("error reading file size: %w", err)
 	}
 
 	// todo: recording date and time
 	ctime, err := readTime(r, offset)
 	if err != nil {
-		return nil, 0, fmt.Errorf("error reading directory entry created at: %w", err)
+		return nil, fmt.Errorf("error reading directory entry created at: %w", err)
 	}
 
 	var flags uint8
 	r.Seek(offset+25, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
-		return nil, 0, fmt.Errorf("error reading file flags: %w", err)
+		return nil, fmt.Errorf("error reading file flags: %w", err)
 	}
 
 	// mode todo:
@@ -514,7 +498,7 @@ func readDirEntry(r *reader, offset int64, joliet bool) (*dirEntry, int, error) 
 	var nameLen uint8
 	r.Seek(offset+32, io.SeekStart)
 	if err := binary.Read(r, binary.LittleEndian, &nameLen); err != nil {
-		return nil, 0, fmt.Errorf("error reading directory entry name length: %w", err)
+		return nil, fmt.Errorf("error reading directory entry name length: %w", err)
 	}
 
 	var name string
@@ -524,10 +508,10 @@ func readDirEntry(r *reader, offset int64, joliet bool) (*dirEntry, int, error) 
 		name, err = readString(r, offset+33, int(nameLen))
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("error reading file name: %w", err)
+		return nil, fmt.Errorf("error reading file name: %w", err)
 	}
 
-	return &dirEntry{len, eaLen, lba, fileSize, ctime, mode, name}, int(len) + skipped, nil
+	return &dirEntry{len, eaLen, lba, fileSize, ctime, mode, name}, nil
 }
 
 func (d *dirEntry) Name() string {
@@ -609,6 +593,21 @@ func (f *file) Close() error {
 	return nil
 }
 
+func ceil(n, m int64) int64 {
+	return m * ((n + (m - 1)) / m)
+}
+
+func (f *file) peek() (byte, error) {
+	buf := make([]byte, 1)
+
+	_, err := f.fs.r.ReadAt(buf, f.start()+f.offset)
+	if err != nil {
+		return 0, err
+	}
+
+	return buf[0], nil
+}
+
 func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 	if !f.dirEntry.IsDir() {
 		return nil, fmt.Errorf("can't call ReadDir on a file")
@@ -624,26 +623,31 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 	start := f.start()
 
 	for len(entries) < n || n <= 0 {
-		dirent, n, err := readDirEntry(f.fs.r, start+f.offset, f.fs.isJoliet())
+		len, err := f.peek()
+		if err != nil {
+			return nil, err
+		}
+
+		if len == 0 {
+			f.offset = ceil(f.offset, sectSize)
+		}
+
+		if f.offset >= f.dirEntry.Size() {
+			break
+		}
+
+		dirent, err := readDirEntry(f.fs.r, start+f.offset, f.fs.isJoliet())
 		if err != nil {
 			return entries, err
 		}
 
-		if dirent.len == 0 {
-			break
-		}
-
-		f.offset += int64(n)
+		f.offset += int64(dirent.len)
 
 		if dirent.Name() == "." || dirent.Name() == ".." {
 			continue
 		}
 
 		entries = append(entries, dirent)
-
-		if f.offset >= int64(f.dirEntry.fileSize) {
-			break
-		}
 	}
 
 	if n > 0 && len(entries) == 0 {
@@ -795,11 +799,16 @@ func main() {
 
 	fname := os.Args[1]
 
-	fsys, err := Open(fname)
+	r, err := mmap.Open(fname)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fsys.Close()
+	defer r.Close()
+
+	fsys, err := NewFS(r, int64(r.Len()))
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// f, err := fsys.Open(".")
 	// if err != nil {
@@ -829,7 +838,7 @@ func main() {
 	// 	}
 	// }
 
-	fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
+	err = fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -847,6 +856,9 @@ func main() {
 
 		return nil
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// 	buf, err := fs.ReadFile(fsys, "bin/awk")
 	// 	if err != nil {
