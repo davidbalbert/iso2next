@@ -820,15 +820,10 @@ func main() {
 			return err
 		}
 
-		info, err := dirent.Info()
-		if err != nil {
-			return err
-		}
-
-		if dirent.IsDir() {
-			fmt.Printf("%s\t%s/\n", info.ModTime(), path)
+		if path == "." {
+			fmt.Println(".")
 		} else {
-			fmt.Printf("%s\t%s\n", info.ModTime(), path)
+			fmt.Printf("./%s\n", path)
 		}
 
 		return nil
