@@ -60,34 +60,6 @@ func parseStringJoliet(buf []byte) (string, error) {
 	return string(utf16.Decode((encoded))), nil
 }
 
-func readStringJoliet(r io.ReaderAt, offset int64, n int) (string, error) {
-	buf, err := readBytes(r, offset, n)
-	if err != nil {
-		return "", err
-	}
-
-	if eq(buf, []byte{0x00}) || eq(buf, []byte{0x01}) {
-		return string(buf), nil
-	}
-
-	buf = bytes.TrimRight(buf, "\x00")
-
-	if len(buf)%2 == 1 {
-		return "", fmt.Errorf("odd length UCS-2 string: %v", buf)
-	}
-
-	br := bytes.NewReader(buf)
-
-	encoded := make([]uint16, len(buf)/2)
-	if err := binary.Read(br, binary.BigEndian, &encoded); err != nil {
-		return "", err
-	}
-
-	runes := utf16.Decode(encoded)
-
-	return string(runes), nil
-}
-
 type vType uint8
 
 const (
@@ -105,7 +77,7 @@ const (
 	vvEnhanced      vVersion = 2
 )
 
-type vDescriptor interface {
+type volumeDescriptor interface {
 	vType() vType
 	vTypeDescription() string
 }
@@ -144,8 +116,35 @@ type vdPrimary struct {
 	vdBase
 	logicalBlockSize uint16
 	root             *dirEntry
-	susp             bool
-	suspNSkip        byte
+}
+
+func (vd *vdPrimary) detectExtensions(r io.ReaderAt) (susp bool, suspNSkip int64, rockRidge bool, err error) {
+	// The "." entry in the root directory holds the root's system use field.
+	rootSelf, err := readDirEntry(r, int64(vd.root.lba)*int64(vd.logicalBlockSize), false)
+	if err != nil {
+		return false, 0, false, err
+	}
+
+	susp = isUsingSUSP(rootSelf.systemUse)
+
+	if susp {
+		entries, err := readSystemUseArea(r, rootSelf.systemUse, int64(vd.logicalBlockSize))
+		if err != nil {
+			return false, 0, false, err
+		}
+
+		i := findEntry(entries, "SP")
+		if i == -1 {
+			return false, 0, false, fmt.Errorf("no SP entry found")
+		}
+
+		return true, int64(entries[i].(*spEntry).nSkip), isUsingRockRidge(entries), nil
+	} else {
+		suspNSkip = 0
+		rockRidge = false
+
+		return false, 0, false, nil
+	}
 }
 
 type vdSupplementary struct {
@@ -213,7 +212,7 @@ func (vd *vdSupplementary) isJoliet() bool {
 	return false
 }
 
-func readVDescriptor(r io.ReaderAt, offset int64) (vDescriptor, error) {
+func readVolumeDescriptor(r io.ReaderAt, offset int64) (volumeDescriptor, error) {
 	buf, err := readBytes(r, offset, 2048)
 	if err != nil {
 		return nil, err
@@ -254,7 +253,7 @@ func parseVdPrimary(buf []byte) (*vdPrimary, error) {
 
 	logicalBlockSize := binary.LittleEndian.Uint16(buf[128:130])
 
-	rootDirEntry, err := parseDirEntry(buf[156:190], int64(logicalBlockSize), false)
+	rootDirEntry, err := parseDirEntry(buf[156:190], false)
 	if err != nil {
 		return nil, fmt.Errorf("error reading root directory entry: %w", err)
 	}
@@ -264,31 +263,10 @@ func parseVdPrimary(buf []byte) (*vdPrimary, error) {
 		return nil, fmt.Errorf("invalid primary descriptor file structure version: %d", fileStructureVersion)
 	}
 
-	// This is the "." dir entry in the root directory. This is where the SUSP
-	// fields for the root directory are stored.
-	// rootDotDirEntry, err := readDirEntry(r, int64(rootDirEntry.lba)*int64(logicalBlockSize), int64(logicalBlockSize), false)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("error reading root directory entry: %w", err)
-	// }
-
-	// entry, err := readSystemUseEntry(r, rootDotDirEntry)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("error reading primary descriptor SUSP entry: %w", err)
-	// }
-
-	susp := false
-	suspNSkip := byte(0)
-	// if entry.Tag() == "SP" {
-	// 	susp = true
-	// 	suspNSkip = entry.(*spEntry).nSkip
-	// }
-
 	return &vdPrimary{
 		vdBase{vType(vtPrimary)},
 		logicalBlockSize,
 		rootDirEntry,
-		susp,
-		suspNSkip,
 	}, nil
 }
 
@@ -298,7 +276,7 @@ func parseVdSupplementary(buf []byte) (*vdSupplementary, error) {
 	escapeSequences := buf[88:120]
 	logicalBlockSize := binary.LittleEndian.Uint16(buf[128:130])
 
-	rootDirEntry, err := parseDirEntry(buf[156:190], int64(logicalBlockSize), false)
+	rootDirEntry, err := parseDirEntry(buf[156:190], false)
 	if err != nil {
 		return nil, fmt.Errorf("error reading root directory entry: %w", err)
 	}
@@ -318,30 +296,54 @@ func parseVdSupplementary(buf []byte) (*vdSupplementary, error) {
 	}, nil
 }
 
-func eachVolumeDescriptor(r io.ReaderAt, fn func(vd vDescriptor) (stop bool)) error {
+func readVolumeDescriptors(r io.ReaderAt) ([]volumeDescriptor, error) {
+	var vds []volumeDescriptor
+
 	var offset int64 = 16 * sectSize
 
 	for {
-		vd, err := readVDescriptor(r, offset)
+		vd, err := readVolumeDescriptor(r, offset)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if vd.vType() == vtTerminator {
 			break
 		}
 
-		stop := fn(vd)
-
-		if stop {
-			break
-		}
+		vds = append(vds, vd)
 
 		offset += sectSize
 	}
 
-	return nil
+	return vds, nil
 }
+
+// func (fsys *FS) readVolumeDescriptors() error {
+// 	err := fsys.eachVolumeDescriptor(func(vd volumeDescriptor) (stop bool) {
+// 		if vd.vType() == vtPrimary {
+// 			fsys.pvd = vd.(*vdPrimary)
+// 		} else if vd.vType() == vtSupplementary {
+// 			svd := vd.(*vdSupplementary)
+
+// 			if svd.isJoliet() {
+// 				// fsys.joliet = svd
+// 			}
+// 		}
+
+// 		return false
+// 	})
+
+// 	if err != nil {
+// 		return fmt.Errorf("error reading primary descriptor: %w", err)
+// 	}
+
+// 	if fsys.pvd == nil {
+// 		return fmt.Errorf("primary descriptor not found")
+// 	}
+
+// 	return nil
+// }
 
 type systemUseEntry interface {
 	Tag() string
@@ -415,105 +417,91 @@ func parseErEntry(base baseSystemUseEntry, data []byte) *erEntry {
 	}
 }
 
-// func readSystemUseEntry(r io.ReaderAt, offset int64) (systemUseEntry, error) {
-// 	sig, err := readBytes(r, offset, 2)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error reading system use entry signature: %w", err)
-// 	}
+func isUsingSUSP(rootSystemUseField []byte) bool {
+	spSize := 7
 
-// 	r.Seek(offset+2, io.SeekStart)
-// 	var len uint8
-// 	if err := binary.Read(r, binary.LittleEndian, &len); err != nil {
-// 		return nil, fmt.Errorf("error reading system use entry length: %w", err)
-// 	}
+	if spSize >= len(rootSystemUseField) {
+		return false
+	}
 
-// 	data, err := readBytes(r, offset, int(len))
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error reading system use entry data: %w", err)
-// 	}
+	len := rootSystemUseField[2]
+	if len != byte(spSize) {
+		return false
+	}
 
-// 	base := baseSystemUseEntry{
-// 		tag:     string(sig),
-// 		len:     len,
-// 		version: data[2],
-// 	}
+	entry := parseSystemUseEntry(rootSystemUseField)
 
-// 	switch string(sig) {
-// 	case "SP":
-// 		return &spEntry{
-// 			baseSystemUseEntry: base,
-// 			check:              data[4:6],
-// 			nSkip:              data[6],
-// 		}, nil
-// 	case "CE":
-// 		return &ceEntry{
-// 			baseSystemUseEntry: base,
-// 			lba:                binary.LittleEndian.Uint32(data[4:8]),
-// 			offset:             binary.LittleEndian.Uint32(data[12:16]),
-// 			len:                binary.LittleEndian.Uint32(data[20:24]),
-// 		}, nil
-// 	case "ER":
-// 		return parseErEntry(base, data), nil
-// 	default:
-// 		return &unknownSystemUseEntry{
-// 			baseSystemUseEntry: base,
-// 			data:               data,
-// 		}, nil
-// 	}
-// }
+	if entry.Tag() != "SP" || !entry.(*spEntry).valid() {
+		return false
+	}
 
-// func usingSUSP(r io.ReaderAt, offset, len int64) (bool, error) {
-// 	spSize := 7
-// 	end := offset + len
+	return true
+}
 
-// 	if offset+int64(spSize) >= end {
-// 		return false, nil
-// 	}
+func isUsingRockRidge(rootEntries []systemUseEntry) bool {
+	for _, entry := range rootEntries {
+		if entry.Tag() == "ER" && entry.(*erEntry).extensionId == "RRIP_1991A" {
+			return true
+		}
+	}
 
-// 	var spLen byte
-// 	r.Seek(offset+2, io.SeekStart)
-// 	if err := binary.Read(r, binary.LittleEndian, &spLen); err != nil {
-// 		return false, fmt.Errorf("error reading SP length: %w", err)
-// 	}
+	return false
+}
 
-// 	if spLen != byte(spSize) {
-// 		return false, nil
-// 	}
+func parseSystemUseEntry(buf []byte) systemUseEntry {
+	sig := buf[0:2]
+	len := buf[2]
+	data := buf[0:len]
 
-// 	entry, err := readSystemUseEntry(r, offset)
-// 	if err != nil {
-// 		return false, fmt.Errorf("error reading SP system use entry: %w", err)
-// 	}
+	base := baseSystemUseEntry{
+		tag:     string(sig),
+		len:     len,
+		version: data[2],
+	}
 
-// 	if entry.Tag() != "SP" || !entry.(*spEntry).valid() {
-// 		return false, nil
-// 	}
+	switch string(sig) {
+	case "SP":
+		return &spEntry{
+			baseSystemUseEntry: base,
+			check:              data[4:6],
+			nSkip:              data[6],
+		}
+	case "CE":
+		return &ceEntry{
+			baseSystemUseEntry: base,
+			lba:                binary.LittleEndian.Uint32(data[4:8]),
+			offset:             binary.LittleEndian.Uint32(data[12:16]),
+			len:                binary.LittleEndian.Uint32(data[20:24]),
+		}
+	case "ER":
+		return parseErEntry(base, data)
+	default:
+		return &unknownSystemUseEntry{
+			baseSystemUseEntry: base,
+			data:               data,
+		}
+	}
+}
 
-// 	return true, nil
-// }
+func parseSystemUseEntries(buf []byte) ([]systemUseEntry, error) {
+	var entries []systemUseEntry
 
-// // also reads continuation areas
-// func readSystemUseField(r io.ReaderAt, offset, len int64) ([]systemUseEntry, error) {
-// 	end := offset + len
-// 	var entries []systemUseEntry
+	offset := int64(0)
+	end := int64(len(buf))
+	for offset < end {
+		entry := parseSystemUseEntry(buf[offset:])
 
-// 	for offset < end {
-// 		entry, err := readSystemUseEntry(r, offset)
-// 		if err != nil {
-// 			return nil, fmt.Errorf("error reading SP system use entry: %w", err)
-// 		}
+		entries = append(entries, entry)
 
-// 		entries = append(entries, entry)
+		if entry.Tag() == "ST" || offset+4 >= end {
+			break
+		}
 
-// 		if entry.Tag() == "ST" || offset+4 >= end {
-// 			break
-// 		}
+		offset += int64(entry.Len())
+	}
 
-// 		offset += int64(entry.Len())
-// 	}
-
-// 	return entries, nil
-// }
+	return entries, nil
+}
 
 func remove(entries []systemUseEntry, i int) []systemUseEntry {
 	return append(entries[:i], entries[i+1:]...)
@@ -528,41 +516,37 @@ func findEntry(entries []systemUseEntry, tag string) int {
 	return -1
 }
 
-// func readSystemUseArea(r io.ReaderAt, offset, len, blockSize int64) ([]systemUseEntry, error) {
-// 	shouldRead, err := usingSUSP(r, offset, len)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error reading system use area: %w", err)
-// 	}
+func readSystemUseArea(r io.ReaderAt, field []byte, blockSize int64) ([]systemUseEntry, error) {
+	entries, err := parseSystemUseEntries(field)
+	if err != nil {
+		return nil, fmt.Errorf("error reading system use field: %w", err)
+	}
 
-// 	if !shouldRead {
-// 		return nil, nil
-// 	}
+	for {
+		i := findEntry(entries, "CE")
 
-// 	entries, err := readSystemUseField(r, offset, len)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error reading system use field: %w", err)
-// 	}
+		if i == -1 {
+			break
+		}
 
-// 	for {
-// 		i := findEntry(entries, "CE")
+		ce := entries[i].(*ceEntry)
+		entries = remove(entries, i)
 
-// 		if i == -1 {
-// 			break
-// 		}
+		continuationArea, err := readBytes(r, ce.start(blockSize), int(ce.len))
+		if err != nil {
+			return nil, fmt.Errorf("error reading continuation area: %w", err)
+		}
 
-// 		ce := entries[i].(*ceEntry)
-// 		entries = remove(entries, i)
+		moreEntries, err := parseSystemUseEntries(continuationArea)
+		if err != nil {
+			return nil, fmt.Errorf("error reading continuation area: %w", err)
+		}
 
-// 		moreEntries, err := readSystemUseField(r, ce.start(blockSize), int64(ce.len))
-// 		if err != nil {
-// 			return nil, fmt.Errorf("error reading continuation area: %w", err)
-// 		}
+		entries = append(entries, moreEntries...)
+	}
 
-// 		entries = append(entries, moreEntries...)
-// 	}
-
-// 	return entries, nil
-// }
+	return entries, nil
+}
 
 const (
 	flagDir uint8 = (1 << 1)
@@ -577,12 +561,10 @@ type dirEntry struct {
 	mode      fs.FileMode
 	name      string
 	systemUse []byte
+	// todo systemUseEntries: []systemUseEntry
 }
 
 func parseTime(buf []byte) time.Time {
-	// var year, month, day, hour, minute, second uint8
-	// var tz int8
-
 	year := buf[0]
 	month := buf[1]
 	day := buf[2]
@@ -610,7 +592,7 @@ func parseTime(buf []byte) time.Time {
 	return time.Date(1900+int(year), time.Month(month), int(day), int(hour), int(minute), int(second), 0, location)
 }
 
-func parseDirEntry(buf []byte, blockSize int64, joliet bool) (*dirEntry, error) {
+func parseDirEntry(buf []byte, joliet bool) (*dirEntry, error) {
 	eaLen := buf[1]
 	lba := binary.LittleEndian.Uint32(buf[2:6])
 	fileSize := binary.LittleEndian.Uint32(buf[10:14])
@@ -651,7 +633,7 @@ func parseDirEntry(buf []byte, blockSize int64, joliet bool) (*dirEntry, error) 
 	return &dirEntry{uint8(len(buf)), eaLen, lba, fileSize, ctime, mode, name, buf[sysStart:]}, nil
 }
 
-func readDirEntry(r io.ReaderAt, offset, blockSize int64, joliet bool) (*dirEntry, error) {
+func readDirEntry(r io.ReaderAt, offset int64, joliet bool) (*dirEntry, error) {
 	len, err := readByte(r, offset)
 	if err != nil {
 		return nil, fmt.Errorf("error reading dir entry length: %w", err)
@@ -662,7 +644,7 @@ func readDirEntry(r io.ReaderAt, offset, blockSize int64, joliet bool) (*dirEntr
 		return nil, fmt.Errorf("error reading dir entry: %w", err)
 	}
 
-	return parseDirEntry(buf, blockSize, joliet)
+	return parseDirEntry(buf, joliet)
 }
 
 func (d *dirEntry) Name() string {
@@ -719,7 +701,7 @@ func (f *file) Stat() (fs.FileInfo, error) {
 
 // returns first byte of the file in the file system
 func (f *file) start() int64 {
-	return int64(f.dirEntry.lba) * f.fsys.blockSize()
+	return int64(f.dirEntry.lba) * f.fsys.logicalBlockSize
 }
 
 func (f *file) Read(p []byte) (int, error) {
@@ -749,14 +731,12 @@ func ceil(n, m int64) int64 {
 }
 
 func (f *file) peek() (byte, error) {
-	buf := make([]byte, 1)
-
-	_, err := f.fsys.r.ReadAt(buf, f.start()+f.offset)
+	b, err := readByte(f.fsys.r, f.start()+f.offset)
 	if err != nil {
 		return 0, err
 	}
 
-	return buf[0], nil
+	return b, nil
 }
 
 func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
@@ -787,7 +767,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			break
 		}
 
-		dirent, err := readDirEntry(f.fsys.r, start+f.offset, f.fsys.blockSize(), f.fsys.isJoliet())
+		dirent, err := readDirEntry(f.fsys.r, start+f.offset, f.fsys.joliet)
 		if err != nil {
 			return entries, err
 		}
@@ -809,9 +789,13 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 }
 
 type FS struct {
-	r      io.ReaderAt
-	pvd    *vdPrimary
-	joliet *vdSupplementary
+	r                io.ReaderAt
+	root             *dirEntry
+	logicalBlockSize int64
+	susp             bool
+	suspNSkip        int64
+	rockRidge        bool
+	joliet           bool
 }
 
 func Open(name string) (*FS, error) {
@@ -824,34 +808,44 @@ func Open(name string) (*FS, error) {
 }
 
 func NewFS(r io.ReaderAt) (*FS, error) {
-	var primary *vdPrimary = nil
-	var joliet *vdSupplementary = nil
-	err := eachVolumeDescriptor(r, func(vd vDescriptor) (stop bool) {
+	vds, err := readVolumeDescriptors(r)
+	if err != nil {
+		return nil, err
+	}
+
+	var primary *vdPrimary
+	// var supplementary *vdSupplementary
+
+	for _, vd := range vds {
 		if vd.vType() == vtPrimary {
 			primary = vd.(*vdPrimary)
-		} else if vd.vType() == vtSupplementary {
-			svd := vd.(*vdSupplementary)
-
-			if svd.isJoliet() {
-				// joliet = svd
-			}
+		} else if vd.vType() == vtSupplementary && vd.(*vdSupplementary).isJoliet() {
+			// supplementary = vd.(*vdSupplementary)
 		}
-
-		return false
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("error reading primary descriptor: %w", err)
 	}
 
 	if primary == nil {
-		return nil, fmt.Errorf("primary descriptor not found")
+		return nil, fmt.Errorf("no primary volume descriptor found")
 	}
 
+	root := primary.root
+	logicalBlockSize := int64(primary.logicalBlockSize)
+
+	susp, suspNSkip, rockRidge, err := primary.detectExtensions(r)
+	if err != nil {
+		return nil, fmt.Errorf("error detecting SUSP and Rock Ridge: %v", err)
+	}
+
+	joliet := false
+
 	return &FS{
-		r:      r,
-		pvd:    primary,
-		joliet: joliet,
+		r:                r,
+		root:             root,
+		logicalBlockSize: logicalBlockSize,
+		susp:             susp,
+		suspNSkip:        suspNSkip,
+		rockRidge:        rockRidge,
+		joliet:           joliet,
 	}, nil
 }
 
@@ -864,26 +858,6 @@ func contains(a []string, s string) bool {
 	return false
 }
 
-func (fsys *FS) isJoliet() bool {
-	return fsys.joliet != nil
-}
-
-func (fsys *FS) blockSize() int64 {
-	if fsys.isJoliet() {
-		return int64(fsys.joliet.logicalBlockSize)
-	} else {
-		return int64(fsys.pvd.logicalBlockSize)
-	}
-}
-
-func (fsys *FS) root() *dirEntry {
-	if fsys.joliet != nil {
-		return fsys.joliet.root
-	} else {
-		return fsys.pvd.root
-	}
-}
-
 func (fsys *FS) walk(name string) (*dirEntry, error) {
 	pathComponents := strings.Split(name, "/")
 
@@ -891,7 +865,7 @@ func (fsys *FS) walk(name string) (*dirEntry, error) {
 		pathComponents = pathComponents[1:]
 	}
 
-	dirent := fsys.root()
+	dirent := fsys.root
 
 	for i, component := range pathComponents {
 		last := i == len(pathComponents)-1
@@ -926,6 +900,7 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
 
+	// TODO, joliet again
 	dirent, err := fsys.walk(name)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
