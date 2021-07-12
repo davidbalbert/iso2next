@@ -398,6 +398,12 @@ type erEntry struct {
 	extensionSource     string
 }
 
+type nmEntry struct {
+	baseSystemUseEntry
+	flags byte
+	name  string
+}
+
 type unknownSystemUseEntry struct {
 	baseSystemUseEntry
 	data []byte
@@ -414,6 +420,31 @@ func parseErEntry(base baseSystemUseEntry, data []byte) *erEntry {
 		extensionId:         string(data[8 : 8+lenId]),
 		extensionDescriptor: string(data[8+lenId : 8+lenId+lenDesc]),
 		extensionSource:     string(data[8+lenId+lenDesc : 8+lenId+lenDesc+lenSource]),
+	}
+}
+
+const (
+	nmFlagContinue byte = 1 << iota
+	nmFlagCurrent
+	nmFlagParent
+)
+
+func parseNmEntry(base baseSystemUseEntry, data []byte) *nmEntry {
+	flags := data[4]
+
+	var name string
+	if flags&nmFlagCurrent != 0 {
+		name = "."
+	} else if flags&nmFlagParent != 0 {
+		name = ".."
+	} else {
+		name = string(data[5:])
+	}
+
+	return &nmEntry{
+		baseSystemUseEntry: base,
+		flags:              flags,
+		name:               name,
 	}
 }
 
@@ -475,6 +506,8 @@ func parseSystemUseEntry(buf []byte) systemUseEntry {
 		}
 	case "ER":
 		return parseErEntry(base, data)
+	case "NM":
+		return parseNmEntry(base, data)
 	default:
 		return &unknownSystemUseEntry{
 			baseSystemUseEntry: base,
@@ -491,13 +524,17 @@ func parseSystemUseEntries(buf []byte) ([]systemUseEntry, error) {
 	for offset < end {
 		entry := parseSystemUseEntry(buf[offset:])
 
-		entries = append(entries, entry)
-
-		if entry.Tag() == "ST" || offset+4 >= end {
+		if entry.Tag() == "ST" {
 			break
 		}
 
+		entries = append(entries, entry)
+
 		offset += int64(entry.Len())
+
+		if offset+4 >= end {
+			break
+		}
 	}
 
 	return entries, nil
@@ -647,6 +684,40 @@ func readDirEntry(r io.ReaderAt, offset int64, joliet bool) (*dirEntry, error) {
 	return parseDirEntry(buf, joliet)
 }
 
+func (fsys *FS) readDirEntry(offset int64) (*dirEntry, error) {
+	dirent, err := readDirEntry(fsys.r, offset, fsys.joliet)
+	if err != nil {
+		return nil, err
+	}
+
+	if fsys.rockRidge {
+		err := dirent.readRockRidge(fsys)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return dirent, nil
+}
+
+func (d *dirEntry) readRockRidge(fsys *FS) error {
+	// todo if d == fsys.root, read "." in root
+
+	entries, err := readSystemUseArea(fsys.r, d.systemUse, fsys.logicalBlockSize)
+	if err != nil {
+		return fmt.Errorf("error reading rock ridge area: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.Tag() == "NM" {
+			// TODO: handle nm.flags&nmFlagContinue != 0
+			d.name = entry.(*nmEntry).name
+		}
+	}
+
+	return nil
+}
+
 func (d *dirEntry) Name() string {
 	if d.name == "\x00" {
 		return "."
@@ -767,7 +838,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			break
 		}
 
-		dirent, err := readDirEntry(f.fsys.r, start+f.offset, f.fsys.joliet)
+		dirent, err := f.fsys.readDirEntry(start + f.offset)
 		if err != nil {
 			return entries, err
 		}
