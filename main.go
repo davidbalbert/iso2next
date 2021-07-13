@@ -598,7 +598,6 @@ type dirEntry struct {
 	mode      fs.FileMode
 	name      string
 	systemUse []byte
-	// todo systemUseEntries: []systemUseEntry
 }
 
 func parseTime(buf []byte) time.Time {
@@ -701,17 +700,34 @@ func (fsys *FS) readDirEntry(offset int64) (*dirEntry, error) {
 }
 
 func (d *dirEntry) readRockRidge(fsys *FS) error {
-	// todo if d == fsys.root, read "." in root
+	var toRead *dirEntry
 
-	entries, err := readSystemUseArea(fsys.r, d.systemUse, fsys.logicalBlockSize)
+	// The "." entry in the root directory holds the root's system use field.
+	if d == fsys.root {
+		var err error
+		toRead, err = readDirEntry(fsys.r, int64(fsys.root.lba)*int64(fsys.logicalBlockSize), false)
+		if err != nil {
+			return fmt.Errorf("couldn't read rock ridge extensions for volume root: %w", err)
+		}
+	} else {
+		toRead = d
+	}
+
+	entries, err := readSystemUseArea(fsys.r, toRead.systemUse, fsys.logicalBlockSize)
 	if err != nil {
 		return fmt.Errorf("error reading rock ridge area: %w", err)
 	}
 
+	name := ""
+
 	for _, entry := range entries {
 		if entry.Tag() == "NM" {
-			// TODO: handle nm.flags&nmFlagContinue != 0
-			d.name = entry.(*nmEntry).name
+			nm := entry.(*nmEntry)
+
+			name += nm.name
+			if nm.flags&nmFlagContinue == 0 {
+				d.name = entry.(*nmEntry).name
+			}
 		}
 	}
 
@@ -909,7 +925,7 @@ func NewFS(r io.ReaderAt) (*FS, error) {
 
 	joliet := false
 
-	return &FS{
+	fsys := &FS{
 		r:                r,
 		root:             root,
 		logicalBlockSize: logicalBlockSize,
@@ -917,7 +933,15 @@ func NewFS(r io.ReaderAt) (*FS, error) {
 		suspNSkip:        suspNSkip,
 		rockRidge:        rockRidge,
 		joliet:           joliet,
-	}, nil
+	}
+
+	if rockRidge {
+		if err := root.readRockRidge(fsys); err != nil {
+			return nil, err
+		}
+	}
+
+	return fsys, nil
 }
 
 func contains(a []string, s string) bool {
@@ -971,7 +995,6 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
 
-	// TODO, joliet again
 	dirent, err := fsys.walk(name)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
