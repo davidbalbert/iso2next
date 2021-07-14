@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf16"
 
@@ -319,32 +320,6 @@ func readVolumeDescriptors(r io.ReaderAt) ([]volumeDescriptor, error) {
 	return vds, nil
 }
 
-// func (fsys *FS) readVolumeDescriptors() error {
-// 	err := fsys.eachVolumeDescriptor(func(vd volumeDescriptor) (stop bool) {
-// 		if vd.vType() == vtPrimary {
-// 			fsys.pvd = vd.(*vdPrimary)
-// 		} else if vd.vType() == vtSupplementary {
-// 			svd := vd.(*vdSupplementary)
-
-// 			if svd.isJoliet() {
-// 				// fsys.joliet = svd
-// 			}
-// 		}
-
-// 		return false
-// 	})
-
-// 	if err != nil {
-// 		return fmt.Errorf("error reading primary descriptor: %w", err)
-// 	}
-
-// 	if fsys.pvd == nil {
-// 		return fmt.Errorf("primary descriptor not found")
-// 	}
-
-// 	return nil
-// }
-
 type systemUseEntry interface {
 	Tag() string
 	Len() byte
@@ -368,6 +343,8 @@ func (e baseSystemUseEntry) Len() byte {
 func (e baseSystemUseEntry) Version() byte {
 	return e.version
 }
+
+// System Use Sharing Protocol
 
 type spEntry struct {
 	baseSystemUseEntry
@@ -398,6 +375,17 @@ type erEntry struct {
 	extensionSource     string
 }
 
+// Rock Ridge Interchange Protocol
+
+type pxEntry struct {
+	baseSystemUseEntry
+	mode  uint32
+	nlink uint32
+	uid   uint32
+	gid   uint32
+	ino   uint32
+}
+
 type nmEntry struct {
 	baseSystemUseEntry
 	flags byte
@@ -420,6 +408,17 @@ func parseErEntry(base baseSystemUseEntry, data []byte) *erEntry {
 		extensionId:         string(data[8 : 8+lenId]),
 		extensionDescriptor: string(data[8+lenId : 8+lenId+lenDesc]),
 		extensionSource:     string(data[8+lenId+lenDesc : 8+lenId+lenDesc+lenSource]),
+	}
+}
+
+func parsePxEntry(base baseSystemUseEntry, data []byte) *pxEntry {
+	return &pxEntry{
+		baseSystemUseEntry: base,
+		mode:               binary.LittleEndian.Uint32(data[4:8]),
+		nlink:              binary.LittleEndian.Uint32(data[12:16]),
+		uid:                binary.LittleEndian.Uint32(data[20:24]),
+		gid:                binary.LittleEndian.Uint32(data[28:32]),
+		ino:                binary.LittleEndian.Uint32(data[36:40]),
 	}
 }
 
@@ -506,6 +505,8 @@ func parseSystemUseEntry(buf []byte) systemUseEntry {
 		}
 	case "ER":
 		return parseErEntry(base, data)
+	case "PX":
+		return parsePxEntry(base, data)
 	case "NM":
 		return parseNmEntry(base, data)
 	default:
@@ -590,14 +591,20 @@ const (
 )
 
 type dirEntry struct {
-	len       uint8
-	eaLen     uint8
-	lba       uint32
-	fileSize  uint32
-	ctime     time.Time
-	mode      fs.FileMode
-	name      string
-	systemUse []byte
+	len              uint8
+	eaLen            uint8
+	lba              uint32
+	fileSize         uint32
+	ctime            time.Time
+	mode             fs.FileMode
+	name             string
+	systemUse        []byte
+	systemUseEntries []systemUseEntry
+
+	nlink uint32
+	uid   uint32
+	gid   uint32
+	ino   uint32
 }
 
 func parseTime(buf []byte) time.Time {
@@ -666,7 +673,16 @@ func parseDirEntry(buf []byte, joliet bool) (*dirEntry, error) {
 
 	sysStart := 33 + int64(nameLen) + padLen
 
-	return &dirEntry{uint8(len(buf)), eaLen, lba, fileSize, ctime, mode, name, buf[sysStart:]}, nil
+	return &dirEntry{
+		len:       uint8(len(buf)),
+		eaLen:     eaLen,
+		lba:       lba,
+		fileSize:  fileSize,
+		ctime:     ctime,
+		mode:      mode,
+		name:      name,
+		systemUse: buf[sysStart:],
+	}, nil
 }
 
 func readDirEntry(r io.ReaderAt, offset int64, joliet bool) (*dirEntry, error) {
@@ -728,8 +744,38 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 			if nm.flags&nmFlagContinue == 0 {
 				d.name = entry.(*nmEntry).name
 			}
+		} else if entry.Tag() == "PX" {
+			px := entry.(*pxEntry)
+
+			d.mode |= fs.FileMode(px.mode & 0777)
+
+			if px.mode&syscall.S_IFSOCK == syscall.S_IFSOCK {
+				d.mode |= fs.ModeSocket
+			} else if px.mode&syscall.S_IFLNK == syscall.S_IFLNK {
+				d.mode |= fs.ModeSymlink
+			} else if px.mode&syscall.S_IFBLK == syscall.S_IFBLK {
+				d.mode |= fs.ModeDevice
+			} else if px.mode&syscall.S_IFCHR == syscall.S_IFCHR {
+				d.mode |= fs.ModeDevice | fs.ModeCharDevice
+			} else if px.mode&syscall.S_IFIFO == syscall.S_IFIFO {
+				d.mode |= fs.ModeNamedPipe
+			}
+
+			if px.mode&syscall.S_ISUID == syscall.S_ISUID {
+				d.mode |= fs.ModeSetuid
+			}
+			if px.mode&syscall.S_ISGID == syscall.S_ISGID {
+				d.mode |= fs.ModeSetgid
+			}
+
+			d.nlink = px.nlink
+			d.uid = px.uid
+			d.gid = px.gid
+			d.ino = px.ino
 		}
 	}
+
+	d.systemUseEntries = entries
 
 	return nil
 }
@@ -1042,10 +1088,19 @@ func main() {
 			return err
 		}
 
+		info, err := dirent.Info()
+		if err != nil {
+			return err
+		}
+
 		if path == "." {
-			fmt.Println(".")
+			fmt.Printf("%s\t.\n", info.Mode().String())
 		} else {
-			fmt.Printf("./%s\n", path)
+			fmt.Printf("%s\t./%s [\n", info.Mode().String(), path)
+			// for _, entry := range dirent.(*dirEntry).systemUseEntries {
+			// 	fmt.Printf("%v ", entry)
+			// }
+			// fmt.Println("]")
 		}
 
 		return nil
