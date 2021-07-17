@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -375,28 +376,6 @@ type erEntry struct {
 	extensionSource     string
 }
 
-// Rock Ridge Interchange Protocol
-
-type pxEntry struct {
-	baseSystemUseEntry
-	mode  uint32
-	nlink uint32
-	uid   uint32
-	gid   uint32
-	ino   uint32
-}
-
-type nmEntry struct {
-	baseSystemUseEntry
-	flags byte
-	name  string
-}
-
-type unknownSystemUseEntry struct {
-	baseSystemUseEntry
-	data []byte
-}
-
 func parseErEntry(base baseSystemUseEntry, data []byte) *erEntry {
 	lenId := data[4]
 	lenDesc := data[5]
@@ -409,6 +388,17 @@ func parseErEntry(base baseSystemUseEntry, data []byte) *erEntry {
 		extensionDescriptor: string(data[8+lenId : 8+lenId+lenDesc]),
 		extensionSource:     string(data[8+lenId+lenDesc : 8+lenId+lenDesc+lenSource]),
 	}
+}
+
+// Rock Ridge Interchange Protocol
+
+type pxEntry struct {
+	baseSystemUseEntry
+	mode  uint32
+	nlink uint32
+	uid   uint32
+	gid   uint32
+	ino   uint32
 }
 
 func parsePxEntry(base baseSystemUseEntry, data []byte) *pxEntry {
@@ -428,6 +418,12 @@ const (
 	nmFlagParent
 )
 
+type nmEntry struct {
+	baseSystemUseEntry
+	flags byte
+	name  string
+}
+
 func parseNmEntry(base baseSystemUseEntry, data []byte) *nmEntry {
 	flags := data[4]
 
@@ -445,6 +441,40 @@ func parseNmEntry(base baseSystemUseEntry, data []byte) *nmEntry {
 		flags:              flags,
 		name:               name,
 	}
+}
+
+const (
+	tfFlagCreation byte = 1 << iota
+	tfFlagModify
+	tfFlagAccess
+	tfFlagAttributes
+	tfFlagBackup
+	tfFlagExpiration
+	tfFlagEffective
+	tfFlagLongForm
+)
+
+type tfEntry struct {
+	baseSystemUseEntry
+	flags               byte
+	creationTime        *time.Time
+	modifyTime          *time.Time
+	accessTime          *time.Time
+	attributeChangeTime *time.Time
+	backupTime          *time.Time
+	expirationTime      *time.Time
+	effectiveTime       *time.Time
+}
+
+func parseTfEntry(base baseSystemUseEntry, data []byte) *tfEntry {
+	flags := data[4]
+	longForm := flags&tfFlagLongForm == tfFlagLongForm
+
+}
+
+type unknownSystemUseEntry struct {
+	baseSystemUseEntry
+	data []byte
 }
 
 func isUsingSUSP(rootSystemUseField []byte) bool {
@@ -607,17 +637,8 @@ type dirEntry struct {
 	ino   uint32
 }
 
-func parseTime(buf []byte) time.Time {
-	year := buf[0]
-	month := buf[1]
-	day := buf[2]
-	hour := buf[3]
-	minute := buf[4]
-	second := buf[5]
-	tz := buf[6]
-
+func location(tzSeconds int) *time.Location {
 	var tzName string
-	tzSeconds := 15 * 60 * int(tz)
 	if tzSeconds == 0 {
 		tzName = "UTC"
 	} else if tzSeconds > 0 && tzSeconds%3600 == 0 {
@@ -630,9 +651,71 @@ func parseTime(buf []byte) time.Time {
 		tzName = fmt.Sprintf("UTC-%d:%0d", -tzSeconds/3600, -tzSeconds/60)
 	}
 
-	location := time.FixedZone(tzName, tzSeconds)
+	return time.FixedZone(tzName, tzSeconds)
+}
 
-	return time.Date(1900+int(year), time.Month(month), int(day), int(hour), int(minute), int(second), 0, location)
+func parseTime(buf []byte) time.Time {
+	year := buf[0]
+	month := buf[1]
+	day := buf[2]
+	hour := buf[3]
+	minute := buf[4]
+	second := buf[5]
+	tz := buf[6]
+
+	return time.Date(1900+int(year), time.Month(month), int(day), int(hour), int(minute), int(second), 0, location(15*60*int(tz)))
+}
+
+func pow(x, y int64) int64 {
+	res := int64(1)
+
+	for y > 0 {
+		res *= x
+		y -= 1
+	}
+
+	return res
+}
+
+func parseLongFormTime(buf []byte) (time.Time, error) {
+	year, err := strconv.Atoi(parseString(buf[0:4]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("can't parse year: %w", err)
+	}
+
+	month, err := strconv.Atoi(parseString(buf[4:6]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("can't parse month: %w", err)
+	}
+
+	day, err := strconv.Atoi(parseString(buf[6:8]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("can't parse day: %w", err)
+	}
+
+	hour, err := strconv.Atoi(parseString(buf[8:10]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("can't parse day: %w", err)
+	}
+
+	minute, err := strconv.Atoi(parseString(buf[10:12]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("can't parse minute: %w", err)
+	}
+
+	second, err := strconv.Atoi(parseString(buf[12:14]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("can't parse second: %w", err)
+	}
+
+	hundredth, err := strconv.Atoi(parseString(buf[14:16]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("can't parse hundreths: %w", err)
+	}
+
+	tz := buf[16]
+
+	return time.Date(year, time.Month(month), day, hour, minute, second, hundredth*int(pow(10, 7)), location(15*60*int(tz))), nil
 }
 
 func parseDirEntry(buf []byte, joliet bool) (*dirEntry, error) {
@@ -1096,11 +1179,11 @@ func main() {
 		if path == "." {
 			fmt.Printf("%s\t.\n", info.Mode().String())
 		} else {
-			fmt.Printf("%s\t./%s [\n", info.Mode().String(), path)
-			// for _, entry := range dirent.(*dirEntry).systemUseEntries {
-			// 	fmt.Printf("%v ", entry)
-			// }
-			// fmt.Println("]")
+			fmt.Printf("%s\t./%s [", info.Mode().String(), path)
+			for _, entry := range dirent.(*dirEntry).systemUseEntries {
+				fmt.Printf("%v ", entry)
+			}
+			fmt.Println("]")
 		}
 
 		return nil
