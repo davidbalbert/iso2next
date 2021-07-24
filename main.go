@@ -466,10 +466,81 @@ type tfEntry struct {
 	effectiveTime       *time.Time
 }
 
-func parseTfEntry(base baseSystemUseEntry, data []byte) *tfEntry {
+func parseTfEntry(base baseSystemUseEntry, data []byte) (*tfEntry, error) {
 	flags := data[4]
-	longForm := flags&tfFlagLongForm == tfFlagLongForm
 
+	var format timeFormat
+	if flags&tfFlagLongForm == tfFlagLongForm {
+		format = tfLong
+	} else {
+		format = tfShort
+	}
+
+	offset := 5
+	size := format.size()
+	var err error
+
+	var creationTime *time.Time
+	if flags&tfFlagCreation == tfFlagCreation {
+		creationTime = parseTime(data[offset:offset+size], format, &err)
+		offset += size
+	}
+
+	var modifyTime *time.Time
+	if flags&tfFlagModify == tfFlagModify {
+		modifyTime = parseTime(data[offset:offset+size], format, &err)
+		offset += size
+	}
+
+	var accessTime *time.Time
+	if flags&tfFlagAccess == tfFlagAccess {
+		accessTime = parseTime(data[offset:offset+size], format, &err)
+		offset += size
+	}
+
+	var attributeChangeTime *time.Time
+	if flags&tfFlagAttributes == tfFlagAttributes {
+		attributeChangeTime = parseTime(data[offset:offset+size], format, &err)
+		offset += size
+	}
+
+	var backupTime *time.Time
+	if flags&tfFlagBackup == tfFlagBackup {
+		backupTime = parseTime(data[offset:offset+size], format, &err)
+		offset += size
+	}
+
+	var expirationTime *time.Time
+	if flags&tfFlagExpiration == tfFlagExpiration {
+		expirationTime = parseTime(data[offset:offset+size], format, &err)
+		offset += size
+	}
+
+	var effectiveTime *time.Time
+	if flags&tfFlagEffective == tfFlagEffective {
+		effectiveTime = parseTime(data[offset:offset+size], format, &err)
+		offset += size
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("can't parse tf entry: %w", err)
+	}
+
+	return &tfEntry{
+		baseSystemUseEntry:  base,
+		flags:               flags,
+		creationTime:        creationTime,
+		modifyTime:          modifyTime,
+		accessTime:          accessTime,
+		attributeChangeTime: attributeChangeTime,
+		backupTime:          backupTime,
+		expirationTime:      expirationTime,
+		effectiveTime:       effectiveTime,
+	}, nil
+}
+
+func (tf *tfEntry) String() string {
+	return fmt.Sprintf("{%v %d %v %v %v %v %v %v %v}", tf.baseSystemUseEntry, tf.flags, tf.creationTime, tf.modifyTime, tf.accessTime, tf.attributeChangeTime, tf.backupTime, tf.expirationTime, tf.effectiveTime)
 }
 
 type unknownSystemUseEntry struct {
@@ -489,9 +560,11 @@ func isUsingSUSP(rootSystemUseField []byte) bool {
 		return false
 	}
 
-	entry := parseSystemUseEntry(rootSystemUseField)
+	entry, err := parseSystemUseEntry(rootSystemUseField)
 
-	if entry.Tag() != "SP" || !entry.(*spEntry).valid() {
+	// parsing an SP entry should never fail, but if something weird happens
+	// and we get an error, just assume we're not using SUSP.
+	if err != nil || entry.Tag() != "SP" || !entry.(*spEntry).valid() {
 		return false
 	}
 
@@ -508,7 +581,7 @@ func isUsingRockRidge(rootEntries []systemUseEntry) bool {
 	return false
 }
 
-func parseSystemUseEntry(buf []byte) systemUseEntry {
+func parseSystemUseEntry(buf []byte) (systemUseEntry, error) {
 	sig := buf[0:2]
 	len := buf[2]
 	data := buf[0:len]
@@ -525,25 +598,27 @@ func parseSystemUseEntry(buf []byte) systemUseEntry {
 			baseSystemUseEntry: base,
 			check:              data[4:6],
 			nSkip:              data[6],
-		}
+		}, nil
 	case "CE":
 		return &ceEntry{
 			baseSystemUseEntry: base,
 			lba:                binary.LittleEndian.Uint32(data[4:8]),
 			offset:             binary.LittleEndian.Uint32(data[12:16]),
 			len:                binary.LittleEndian.Uint32(data[20:24]),
-		}
+		}, nil
 	case "ER":
-		return parseErEntry(base, data)
+		return parseErEntry(base, data), nil
 	case "PX":
-		return parsePxEntry(base, data)
+		return parsePxEntry(base, data), nil
 	case "NM":
-		return parseNmEntry(base, data)
+		return parseNmEntry(base, data), nil
+	case "TF":
+		return parseTfEntry(base, data)
 	default:
 		return &unknownSystemUseEntry{
 			baseSystemUseEntry: base,
 			data:               data,
-		}
+		}, nil
 	}
 }
 
@@ -553,7 +628,10 @@ func parseSystemUseEntries(buf []byte) ([]systemUseEntry, error) {
 	offset := int64(0)
 	end := int64(len(buf))
 	for offset < end {
-		entry := parseSystemUseEntry(buf[offset:])
+		entry, err := parseSystemUseEntry(buf[offset:])
+		if err != nil {
+			return nil, err
+		}
 
 		if entry.Tag() == "ST" {
 			break
@@ -654,7 +732,44 @@ func location(tzSeconds int) *time.Location {
 	return time.FixedZone(tzName, tzSeconds)
 }
 
-func parseTime(buf []byte) time.Time {
+type timeFormat int
+
+const (
+	tfShort timeFormat = iota
+	tfLong
+)
+
+func (f timeFormat) size() int {
+	if f == tfLong {
+		return 17
+	} else {
+		return 7
+	}
+}
+
+func parseTime(buf []byte, format timeFormat, errp *error) *time.Time {
+	if *errp != nil {
+		return nil
+	}
+
+	if format == tfLong {
+		t, err := parseLongFormTime(buf)
+		if err != nil {
+			*errp = err
+			return nil
+		}
+
+		return &t
+	} else if format == tfShort {
+		t := parseShortFormTime(buf)
+		return &t
+	} else {
+		*errp = fmt.Errorf("unknown time format: %d", format)
+		return nil
+	}
+}
+
+func parseShortFormTime(buf []byte) time.Time {
 	year := buf[0]
 	month := buf[1]
 	day := buf[2]
@@ -722,7 +837,7 @@ func parseDirEntry(buf []byte, joliet bool) (*dirEntry, error) {
 	eaLen := buf[1]
 	lba := binary.LittleEndian.Uint32(buf[2:6])
 	fileSize := binary.LittleEndian.Uint32(buf[10:14])
-	ctime := parseTime(buf[18:25])
+	ctime := parseShortFormTime(buf[18:25])
 	flags := buf[25]
 
 	// mode todo:
