@@ -543,6 +543,19 @@ func (tf *tfEntry) String() string {
 	return fmt.Sprintf("{%v %d %v %v %v %v %v %v %v}", tf.baseSystemUseEntry, tf.flags, tf.creationTime, tf.modifyTime, tf.accessTime, tf.attributeChangeTime, tf.backupTime, tf.expirationTime, tf.effectiveTime)
 }
 
+const (
+	slFlagContinue byte = 1 << iota
+	slFlagCurrent
+	slFlagParent
+	slFlagRoot
+)
+
+type slEntry struct {
+	baseSystemUseEntry
+	flags          byte
+	pathComponents []string
+}
+
 type unknownSystemUseEntry struct {
 	baseSystemUseEntry
 	data []byte
@@ -970,6 +983,10 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 			d.uid = px.uid
 			d.gid = px.gid
 			d.ino = px.ino
+		} else if entry.Tag() == "TF" {
+			tf := entry.(*tfEntry)
+
+			d.ctime = *tf.modifyTime
 		}
 	}
 
