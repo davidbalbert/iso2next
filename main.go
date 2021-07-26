@@ -518,6 +518,40 @@ func parseNmEntry(base baseSystemUseEntry, data []byte) *nmEntry {
 	}
 }
 
+type clEntry struct {
+	baseSystemUseEntry
+	childLba uint32
+}
+
+func parseClEntry(base baseSystemUseEntry, data []byte) *clEntry {
+	return &clEntry{
+		baseSystemUseEntry: base,
+		childLba:           binary.LittleEndian.Uint32(data[4:8]),
+	}
+}
+
+type plEntry struct {
+	baseSystemUseEntry
+	parentLba uint32
+}
+
+func parsePlEntry(base baseSystemUseEntry, data []byte) *plEntry {
+	return &plEntry{
+		baseSystemUseEntry: base,
+		parentLba:          binary.LittleEndian.Uint32(data[4:8]),
+	}
+}
+
+type reEntry struct {
+	baseSystemUseEntry
+}
+
+func parseReEntry(base baseSystemUseEntry, data []byte) *reEntry {
+	return &reEntry{
+		baseSystemUseEntry: base,
+	}
+}
+
 const (
 	tfFlagCreation byte = 1 << iota
 	tfFlagModify
@@ -687,12 +721,18 @@ func parseSystemUseEntry(buf []byte) (systemUseEntry, error) {
 		return parsePxEntry(base, data), nil
 	case "PN":
 		return parsePnEntry(base, data), nil
-	case "NM":
-		return parseNmEntry(base, data), nil
-	case "TF":
-		return parseTfEntry(base, data)
 	case "SL":
 		return parseSlEntry(base, data), nil
+	case "NM":
+		return parseNmEntry(base, data), nil
+	case "CL":
+		return parseClEntry(base, data), nil
+	case "PL":
+		return parsePlEntry(base, data), nil
+	case "RE":
+		return parseReEntry(base, data), nil
+	case "TF":
+		return parseTfEntry(base, data)
 	default:
 		return &unknownSystemUseEntry{
 			baseSystemUseEntry: base,
@@ -800,14 +840,28 @@ type dirEntry struct {
 
 	// Rock Ridge fields
 
+	// PX
 	nlink uint32
 	uid   uint32
 	gid   uint32
 	ino   uint32
 
+	// PN
+	dev uint64
+
+	// SL
 	symlink string
 
-	dev uint64
+	// CL
+	cl       bool
+	childLba uint32
+
+	// PL
+	pl        bool
+	parentLba uint32
+
+	// RE
+	relocated bool
 }
 
 func (d *dirEntry) Readlink() (string, error) {
@@ -1079,13 +1133,6 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 			pn := entry.(*pnEntry)
 
 			d.dev = pn.dev
-		} else if entry.Tag() == "NM" {
-			nm := entry.(*nmEntry)
-
-			name += nm.name
-			if nm.flags&nmFlagContinue == 0 {
-				d.name = entry.(*nmEntry).name
-			}
 		} else if entry.Tag() == "SL" {
 			sl := entry.(*slEntry)
 
@@ -1094,6 +1141,25 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 			if sl.flags&slFlagContinue == 0 {
 				d.symlink = symlinkFromSl(slComponentRecords)
 			}
+		} else if entry.Tag() == "NM" {
+			nm := entry.(*nmEntry)
+
+			name += nm.name
+			if nm.flags&nmFlagContinue == 0 {
+				d.name = entry.(*nmEntry).name
+			}
+		} else if entry.Tag() == "CL" {
+			cl := entry.(*clEntry)
+
+			d.cl = true
+			d.childLba = cl.childLba
+		} else if entry.Tag() == "PL" {
+			pl := entry.(*plEntry)
+
+			d.pl = true
+			d.parentLba = pl.parentLba
+		} else if entry.Tag() == "RE" {
+			d.relocated = true
 		} else if entry.Tag() == "TF" {
 			tf := entry.(*tfEntry)
 
@@ -1236,6 +1302,10 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 		if dirent.Name() == "." || dirent.Name() == ".." {
 			continue
 		}
+
+		// if dirent.relocated {
+		// 	continue
+		// }
 
 		entries = append(entries, dirent)
 	}
@@ -1428,7 +1498,7 @@ func main() {
 		}
 
 		if path == "." {
-			fmt.Printf("%s\t.\n", info.Mode().String())
+			fmt.Printf("%s\t%d\t/\n", info.Mode().String(), info.Size())
 			return nil
 		}
 
@@ -1438,9 +1508,23 @@ func main() {
 				return err
 			}
 
-			fmt.Printf("%s\t%d, %d\t./%s", info.Mode().String(), major(dev), minor(dev), path)
+			fmt.Printf("%s\t%d, %d\t/%s", info.Mode().String(), major(dev), minor(dev), path)
 		} else {
-			fmt.Printf("%s\t%d\t./%s", info.Mode().String(), info.Size(), path)
+			fmt.Printf("%s\t%d\t/%s", info.Mode().String(), info.Size(), path)
+		}
+
+		if dirent, ok := dirent.(*dirEntry); ok {
+			if dirent.relocated {
+				fmt.Printf("\t(relocated)")
+			}
+
+			if dirent.cl {
+				fmt.Printf("\t(CL)")
+			}
+
+			if dirent.pl {
+				fmt.Printf("\t(PL)")
+			}
 		}
 
 		if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
