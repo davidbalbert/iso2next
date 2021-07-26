@@ -550,10 +550,57 @@ const (
 	slFlagRoot
 )
 
+type slComponentRecord struct {
+	flags   byte
+	content []byte
+}
+
+func symlinkFromSl(records []slComponentRecord) string {
+	var buf bytes.Buffer
+	for i, rec := range records {
+		if rec.flags&slFlagRoot != 0 {
+			buf.WriteString("/")
+		} else if rec.flags&slFlagParent != 0 {
+			buf.WriteString("../")
+		} else if rec.flags&slFlagCurrent != 0 {
+			buf.WriteString("./")
+		} else if rec.flags&slFlagContinue != 0 {
+			buf.Write(rec.content)
+		} else {
+			buf.Write(rec.content)
+
+			if i != len(records)-1 {
+				buf.WriteString("/")
+			}
+		}
+	}
+	return buf.String()
+}
+
 type slEntry struct {
 	baseSystemUseEntry
-	flags          byte
-	pathComponents []string
+	flags            byte
+	componentRecords []slComponentRecord
+}
+
+func parseSlEntry(base baseSystemUseEntry, data []byte) *slEntry {
+	flags := data[4]
+
+	var componentRecords []slComponentRecord
+	offset := 5
+	for offset < len(data) {
+		flags := data[offset]
+		contentLen := int(data[offset+1])
+		content := data[offset+2 : offset+2+contentLen]
+		componentRecords = append(componentRecords, slComponentRecord{flags, content})
+		offset += 2 + contentLen
+	}
+
+	return &slEntry{
+		baseSystemUseEntry: base,
+		flags:              flags,
+		componentRecords:   componentRecords,
+	}
 }
 
 type unknownSystemUseEntry struct {
@@ -627,6 +674,8 @@ func parseSystemUseEntry(buf []byte) (systemUseEntry, error) {
 		return parseNmEntry(base, data), nil
 	case "TF":
 		return parseTfEntry(base, data)
+	case "SL":
+		return parseSlEntry(base, data), nil
 	default:
 		return &unknownSystemUseEntry{
 			baseSystemUseEntry: base,
@@ -711,6 +760,11 @@ const (
 	flagDir uint8 = (1 << 1)
 )
 
+type ReadlinkDirEntry interface {
+	fs.DirEntry
+	Readlink() (string, error)
+}
+
 type dirEntry struct {
 	len              uint8
 	eaLen            uint8
@@ -722,10 +776,22 @@ type dirEntry struct {
 	systemUse        []byte
 	systemUseEntries []systemUseEntry
 
+	// Rock Ridge fields
+
 	nlink uint32
 	uid   uint32
 	gid   uint32
 	ino   uint32
+
+	symlink string
+}
+
+func (d *dirEntry) Readlink() (string, error) {
+	if d.mode&fs.ModeSymlink == 0 {
+		return "", fmt.Errorf("not a symlink: %s", d.name)
+	}
+
+	return d.symlink, nil
 }
 
 func location(tzSeconds int) *time.Location {
@@ -942,10 +1008,11 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 
 	entries, err := readSystemUseArea(fsys.r, toRead.systemUse, fsys.logicalBlockSize)
 	if err != nil {
-		return fmt.Errorf("error reading rock ridge area: %w", err)
+		return fmt.Errorf("error reading rock ridge: %w", err)
 	}
 
 	name := ""
+	var slComponentRecords []slComponentRecord
 
 	for _, entry := range entries {
 		if entry.Tag() == "NM" {
@@ -987,6 +1054,14 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 			tf := entry.(*tfEntry)
 
 			d.ctime = *tf.modifyTime
+		} else if entry.Tag() == "SL" {
+			sl := entry.(*slEntry)
+
+			slComponentRecords = append(slComponentRecords, sl.componentRecords...)
+
+			if sl.flags&slFlagContinue == 0 {
+				d.symlink = symlinkFromSl(slComponentRecords)
+			}
 		}
 	}
 
@@ -1310,13 +1385,25 @@ func main() {
 
 		if path == "." {
 			fmt.Printf("%s\t.\n", info.Mode().String())
-		} else {
-			fmt.Printf("%s\t./%s [", info.Mode().String(), path)
-			for _, entry := range dirent.(*dirEntry).systemUseEntries {
-				fmt.Printf("%v ", entry)
-			}
-			fmt.Println("]")
+			return nil
 		}
+
+		fmt.Printf("%s\t./%s", info.Mode().String(), path)
+
+		if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
+			target, err := dirent.Readlink()
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf(" -> %s", target)
+		}
+
+		fmt.Print(" [")
+		for _, entry := range dirent.(*dirEntry).systemUseEntries {
+			fmt.Printf("%v ", entry)
+		}
+		fmt.Println("]")
 
 		return nil
 	})
