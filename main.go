@@ -412,6 +412,21 @@ func parsePxEntry(base baseSystemUseEntry, data []byte) *pxEntry {
 	}
 }
 
+type pnEntry struct {
+	baseSystemUseEntry
+	dev uint64
+}
+
+func parsePnEntry(base baseSystemUseEntry, data []byte) *pnEntry {
+	devhi := binary.LittleEndian.Uint32(data[4:8])
+	devlo := binary.LittleEndian.Uint32(data[12:16])
+
+	return &pnEntry{
+		baseSystemUseEntry: base,
+		dev:                uint64(devhi)<<32 | uint64(devlo),
+	}
+}
+
 const (
 	slFlagContinue byte = 1 << iota
 	slFlagCurrent
@@ -670,6 +685,8 @@ func parseSystemUseEntry(buf []byte) (systemUseEntry, error) {
 		return parseErEntry(base, data), nil
 	case "PX":
 		return parsePxEntry(base, data), nil
+	case "PN":
+		return parsePnEntry(base, data), nil
 	case "NM":
 		return parseNmEntry(base, data), nil
 	case "TF":
@@ -765,6 +782,11 @@ type ReadlinkDirEntry interface {
 	Readlink() (string, error)
 }
 
+type DevDirEntry interface {
+	fs.DirEntry
+	Device() (uint64, error)
+}
+
 type dirEntry struct {
 	len              uint8
 	eaLen            uint8
@@ -784,6 +806,8 @@ type dirEntry struct {
 	ino   uint32
 
 	symlink string
+
+	dev uint64
 }
 
 func (d *dirEntry) Readlink() (string, error) {
@@ -792,6 +816,14 @@ func (d *dirEntry) Readlink() (string, error) {
 	}
 
 	return d.symlink, nil
+}
+
+func (d *dirEntry) Device() (uint64, error) {
+	if d.mode&fs.ModeDevice == 0 {
+		return 0, fmt.Errorf("not a device: %s", d.name)
+	}
+
+	return d.dev, nil
 }
 
 func location(tzSeconds int) *time.Location {
@@ -1015,14 +1047,7 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 	var slComponentRecords []slComponentRecord
 
 	for _, entry := range entries {
-		if entry.Tag() == "NM" {
-			nm := entry.(*nmEntry)
-
-			name += nm.name
-			if nm.flags&nmFlagContinue == 0 {
-				d.name = entry.(*nmEntry).name
-			}
-		} else if entry.Tag() == "PX" {
+		if entry.Tag() == "PX" {
 			px := entry.(*pxEntry)
 
 			d.mode |= fs.FileMode(px.mode & 0777)
@@ -1050,10 +1075,17 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 			d.uid = px.uid
 			d.gid = px.gid
 			d.ino = px.ino
-		} else if entry.Tag() == "TF" {
-			tf := entry.(*tfEntry)
+		} else if entry.Tag() == "PN" {
+			pn := entry.(*pnEntry)
 
-			d.ctime = *tf.modifyTime
+			d.dev = pn.dev
+		} else if entry.Tag() == "NM" {
+			nm := entry.(*nmEntry)
+
+			name += nm.name
+			if nm.flags&nmFlagContinue == 0 {
+				d.name = entry.(*nmEntry).name
+			}
 		} else if entry.Tag() == "SL" {
 			sl := entry.(*slEntry)
 
@@ -1062,6 +1094,10 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 			if sl.flags&slFlagContinue == 0 {
 				d.symlink = symlinkFromSl(slComponentRecords)
 			}
+		} else if entry.Tag() == "TF" {
+			tf := entry.(*tfEntry)
+
+			d.ctime = *tf.modifyTime
 		}
 	}
 
@@ -1347,6 +1383,14 @@ func (fsys *FS) Close() error {
 	return nil
 }
 
+func major(dev uint64) uint64 {
+	return dev >> 32
+}
+
+func minor(dev uint64) uint64 {
+	return dev & 0xffffffff
+}
+
 func main() {
 	log.SetFlags(0)
 
@@ -1388,7 +1432,16 @@ func main() {
 			return nil
 		}
 
-		fmt.Printf("%s\t./%s", info.Mode().String(), path)
+		if dirent, ok := dirent.(DevDirEntry); info.Mode()&fs.ModeDevice != 0 && ok {
+			dev, err := dirent.Device()
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("%s\t%d, %d\t./%s", info.Mode().String(), major(dev), minor(dev), path)
+		} else {
+			fmt.Printf("%s\t%d\t./%s", info.Mode().String(), info.Size(), path)
+		}
 
 		if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
 			target, err := dirent.Readlink()
@@ -1398,12 +1451,13 @@ func main() {
 
 			fmt.Printf(" -> %s", target)
 		}
+		fmt.Println()
 
-		fmt.Print(" [")
-		for _, entry := range dirent.(*dirEntry).systemUseEntries {
-			fmt.Printf("%v ", entry)
-		}
-		fmt.Println("]")
+		// fmt.Print(" [")
+		// for _, entry := range dirent.(*dirEntry).systemUseEntries {
+		// 	fmt.Printf("%v ", entry)
+		// }
+		// fmt.Println("]")
 
 		return nil
 	})
