@@ -413,6 +413,66 @@ func parsePxEntry(base baseSystemUseEntry, data []byte) *pxEntry {
 }
 
 const (
+	slFlagContinue byte = 1 << iota
+	slFlagCurrent
+	slFlagParent
+	slFlagRoot
+)
+
+type slComponentRecord struct {
+	flags   byte
+	content []byte
+}
+
+func symlinkFromSl(records []slComponentRecord) string {
+	var buf bytes.Buffer
+	for i, rec := range records {
+		if rec.flags&slFlagRoot != 0 {
+			buf.WriteString("/")
+		} else if rec.flags&slFlagParent != 0 {
+			buf.WriteString("../")
+		} else if rec.flags&slFlagCurrent != 0 {
+			buf.WriteString("./")
+		} else if rec.flags&slFlagContinue != 0 {
+			buf.Write(rec.content)
+		} else {
+			buf.Write(rec.content)
+
+			if i != len(records)-1 {
+				buf.WriteString("/")
+			}
+		}
+	}
+	return buf.String()
+}
+
+type slEntry struct {
+	baseSystemUseEntry
+	flags            byte
+	componentRecords []slComponentRecord
+}
+
+func parseSlEntry(base baseSystemUseEntry, data []byte) *slEntry {
+	flags := data[4]
+
+	var componentRecords []slComponentRecord
+	offset := 5
+	for offset < len(data) {
+		flags := data[offset]
+		contentLen := int(data[offset+1])
+		content := data[offset+2 : offset+2+contentLen]
+		componentRecords = append(componentRecords, slComponentRecord{flags, content})
+		offset += 2 + contentLen
+	}
+
+	return &slEntry{
+		baseSystemUseEntry: base,
+		flags:              flags,
+		componentRecords:   componentRecords,
+	}
+}
+
+const (
 	nmFlagContinue byte = 1 << iota
 	nmFlagCurrent
 	nmFlagParent
@@ -541,66 +601,6 @@ func parseTfEntry(base baseSystemUseEntry, data []byte) (*tfEntry, error) {
 
 func (tf *tfEntry) String() string {
 	return fmt.Sprintf("{%v %d %v %v %v %v %v %v %v}", tf.baseSystemUseEntry, tf.flags, tf.creationTime, tf.modifyTime, tf.accessTime, tf.attributeChangeTime, tf.backupTime, tf.expirationTime, tf.effectiveTime)
-}
-
-const (
-	slFlagContinue byte = 1 << iota
-	slFlagCurrent
-	slFlagParent
-	slFlagRoot
-)
-
-type slComponentRecord struct {
-	flags   byte
-	content []byte
-}
-
-func symlinkFromSl(records []slComponentRecord) string {
-	var buf bytes.Buffer
-	for i, rec := range records {
-		if rec.flags&slFlagRoot != 0 {
-			buf.WriteString("/")
-		} else if rec.flags&slFlagParent != 0 {
-			buf.WriteString("../")
-		} else if rec.flags&slFlagCurrent != 0 {
-			buf.WriteString("./")
-		} else if rec.flags&slFlagContinue != 0 {
-			buf.Write(rec.content)
-		} else {
-			buf.Write(rec.content)
-
-			if i != len(records)-1 {
-				buf.WriteString("/")
-			}
-		}
-	}
-	return buf.String()
-}
-
-type slEntry struct {
-	baseSystemUseEntry
-	flags            byte
-	componentRecords []slComponentRecord
-}
-
-func parseSlEntry(base baseSystemUseEntry, data []byte) *slEntry {
-	flags := data[4]
-
-	var componentRecords []slComponentRecord
-	offset := 5
-	for offset < len(data) {
-		flags := data[offset]
-		contentLen := int(data[offset+1])
-		content := data[offset+2 : offset+2+contentLen]
-		componentRecords = append(componentRecords, slComponentRecord{flags, content})
-		offset += 2 + contentLen
-	}
-
-	return &slEntry{
-		baseSystemUseEntry: base,
-		flags:              flags,
-		componentRecords:   componentRecords,
-	}
 }
 
 type unknownSystemUseEntry struct {
