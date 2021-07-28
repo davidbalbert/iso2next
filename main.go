@@ -1514,20 +1514,6 @@ func main() {
 			fmt.Printf("%s\t%d\t/%s", info.Mode().String(), info.Size(), path)
 		}
 
-		if dirent, ok := dirent.(*dirEntry); ok {
-			if dirent.relocated {
-				fmt.Printf("\t(relocated)")
-			}
-
-			if dirent.cl {
-				fmt.Printf("\t(CL)")
-			}
-
-			if dirent.pl {
-				fmt.Printf("\t(PL)")
-			}
-		}
-
 		if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
 			target, err := dirent.Readlink()
 			if err != nil {
