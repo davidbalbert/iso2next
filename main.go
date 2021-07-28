@@ -745,8 +745,13 @@ func parseSystemUseEntries(buf []byte) ([]systemUseEntry, error) {
 	var entries []systemUseEntry
 
 	offset := int64(0)
-	end := int64(len(buf))
-	for offset < end {
+	length := int64(len(buf))
+
+	// The smallest valid System Use Entry has 4 bytes (sig0, sig1, length, and version).
+	// This would take up the bytes offset+0, offset+1, offset+2, and offset+3. This means
+	// we need to ensure that we can read through at least offset+3 before we parse another
+	// System Use Entry.
+	for offset+3 < length {
 		entry, err := parseSystemUseEntry(buf[offset:])
 		if err != nil {
 			return nil, err
@@ -759,10 +764,6 @@ func parseSystemUseEntries(buf []byte) ([]systemUseEntry, error) {
 		entries = append(entries, entry)
 
 		offset += int64(entry.Len())
-
-		if offset+4 >= end {
-			break
-		}
 	}
 
 	return entries, nil
