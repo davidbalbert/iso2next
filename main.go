@@ -1304,9 +1304,9 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			continue
 		}
 
-		// if dirent.relocated {
-		// 	continue
-		// }
+		if dirent.relocated {
+			continue
+		}
 
 		entries = append(entries, dirent)
 	}
