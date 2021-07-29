@@ -127,10 +127,10 @@ func (vd *vdPrimary) detectExtensions(r io.ReaderAt) (susp bool, suspNSkip int64
 		return false, 0, false, err
 	}
 
-	susp = isUsingSUSP(rootSelf.systemUse)
+	susp = isUsingSUSP(rootSelf.systemUseField)
 
 	if susp {
-		entries, err := readSystemUseArea(r, rootSelf.systemUse, int64(vd.logicalBlockSize))
+		entries, err := readSystemUseArea(r, rootSelf.systemUseField, int64(vd.logicalBlockSize))
 		if err != nil {
 			return false, 0, false, err
 		}
@@ -836,7 +836,7 @@ type dirEntry struct {
 	ctime            time.Time
 	mode             fs.FileMode
 	name             string
-	systemUse        []byte
+	systemUseField   []byte
 	systemUseEntries []systemUseEntry
 
 	// Rock Ridge fields
@@ -1038,14 +1038,14 @@ func parseDirEntry(buf []byte, joliet bool) (*dirEntry, error) {
 	sysStart := 33 + int64(nameLen) + padLen
 
 	return &dirEntry{
-		len:       uint8(len(buf)),
-		eaLen:     eaLen,
-		lba:       lba,
-		fileSize:  fileSize,
-		ctime:     ctime,
-		mode:      mode,
-		name:      name,
-		systemUse: buf[sysStart:],
+		len:            uint8(len(buf)),
+		eaLen:          eaLen,
+		lba:            lba,
+		fileSize:       fileSize,
+		ctime:          ctime,
+		mode:           mode,
+		name:           name,
+		systemUseField: buf[sysStart:],
 	}, nil
 }
 
@@ -1108,7 +1108,7 @@ func (d *dirEntry) readRockRidge(fsys *FS) error {
 		toRead = d
 	}
 
-	entries, err := readSystemUseArea(fsys.r, toRead.systemUse, fsys.logicalBlockSize)
+	entries, err := readSystemUseArea(fsys.r, toRead.systemUseField[fsys.suspNSkip:], fsys.logicalBlockSize)
 	if err != nil {
 		return fmt.Errorf("error reading rock ridge: %w", err)
 	}
