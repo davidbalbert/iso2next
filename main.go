@@ -823,7 +823,7 @@ type ReadlinkDirEntry interface {
 	Readlink() (string, error)
 }
 
-type DevDirEntry interface {
+type DeviceDirEntry interface {
 	fs.DirEntry
 	Device() (uint64, error)
 }
@@ -1513,20 +1513,23 @@ func main() {
 			return err
 		}
 
-		if path == "." {
-			fmt.Printf("%s\t%d\t/\n", info.Mode().String(), info.Size())
-			return nil
-		}
+		fmt.Printf("%s\t", info.Mode().String())
 
-		if dirent, ok := dirent.(DevDirEntry); info.Mode()&fs.ModeDevice != 0 && ok {
+		if dirent, ok := dirent.(DeviceDirEntry); info.Mode()&fs.ModeDevice != 0 && ok {
 			dev, err := dirent.Device()
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("%s\t%d, %d\t/%s", info.Mode().String(), major(dev), minor(dev), path)
+			fmt.Printf("%d, %d\t", major(dev), minor(dev))
 		} else {
-			fmt.Printf("%s\t%d\t/%s", info.Mode().String(), info.Size(), path)
+			fmt.Printf("%d\t", info.Size())
+		}
+
+		if path == "." {
+			fmt.Print("/")
+		} else {
+			fmt.Printf("/%s", path)
 		}
 
 		if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
@@ -1537,12 +1540,17 @@ func main() {
 
 			fmt.Printf(" -> %s", target)
 		}
+
 		fmt.Println()
 
 		// if dirent, ok := dirent.(*dirEntry); ok {
 		// 	fmt.Print(" [")
-		// 	for _, entry := range dirent.systemUseEntries {
-		// 		fmt.Printf("%v ", entry.Tag())
+		// 	for i, entry := range dirent.systemUseEntries {
+		// 		fmt.Print(entry.Tag())
+
+		// 		if i != len(dirent.systemUseEntries)-1 {
+		// 			fmt.Print(" ")
+		// 		}
 		// 	}
 		// 	fmt.Println("]")
 		// } else {
