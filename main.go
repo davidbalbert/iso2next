@@ -830,7 +830,7 @@ type DevDirEntry interface {
 
 type dirEntry struct {
 	len              uint8
-	eaLen            uint8
+	eaLen            uint8 // extend attribute record length
 	lba              uint32
 	fileSize         uint32
 	ctime            time.Time
@@ -1063,20 +1063,35 @@ func readDirEntry(r io.ReaderAt, offset int64, joliet bool) (*dirEntry, error) {
 	return parseDirEntry(buf, joliet)
 }
 
-func (fsys *FS) readDirEntry(offset int64) (*dirEntry, error) {
+func (fsys *FS) readDirEntry(offset int64) (*dirEntry, int, error) {
 	dirent, err := readDirEntry(fsys.r, offset, fsys.joliet)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if fsys.rockRidge {
 		err := dirent.readRockRidge(fsys)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
-	return dirent, nil
+	// This is the common case: we haven't been relocated.
+	if !dirent.cl {
+		return dirent, int(dirent.len), nil
+	}
+
+	child, _, err := fsys.readDirEntry(int64(dirent.childLba) * int64(fsys.logicalBlockSize))
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Child is the "." entry in the relocated directory. It has the right info, but
+	// it's missing the name. Save the name from the parent, and use the child for
+	// everything else.
+	child.name = dirent.name
+
+	return child, int(dirent.len), nil
 }
 
 func (d *dirEntry) readRockRidge(fsys *FS) error {
@@ -1293,12 +1308,12 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			break
 		}
 
-		dirent, err := f.fsys.readDirEntry(start + f.offset)
+		dirent, n, err := f.fsys.readDirEntry(start + f.offset)
 		if err != nil {
 			return entries, err
 		}
 
-		f.offset += int64(dirent.len)
+		f.offset += int64(n)
 
 		if dirent.Name() == "." || dirent.Name() == ".." {
 			continue
@@ -1524,11 +1539,15 @@ func main() {
 		}
 		fmt.Println()
 
-		// fmt.Print(" [")
-		// for _, entry := range dirent.(*dirEntry).systemUseEntries {
-		// 	fmt.Printf("%v ", entry)
+		// if dirent, ok := dirent.(*dirEntry); ok {
+		// 	fmt.Print(" [")
+		// 	for _, entry := range dirent.systemUseEntries {
+		// 		fmt.Printf("%v ", entry.Tag())
+		// 	}
+		// 	fmt.Println("]")
+		// } else {
+		// 	fmt.Println()
 		// }
-		// fmt.Println("]")
 
 		return nil
 	})
