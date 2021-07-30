@@ -662,7 +662,7 @@ func isUsingSUSP(rootSystemUseField []byte) bool {
 
 func isUsingRockRidge(rootEntries []systemUseEntry) bool {
 	for _, entry := range rootEntries {
-		if entry.Tag() == "ER" && entry.(*erEntry).extensionId == "RRIP_1991A" {
+		if entry.Tag() == "ER" && (entry.(*erEntry).extensionId == "RRIP_1991A" || entry.(*erEntry).extensionId == "IEEE_P1282") {
 			return true
 		}
 	}
