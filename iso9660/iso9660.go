@@ -1330,29 +1330,43 @@ type FS struct {
 	joliet           bool
 }
 
-func Open(name string) (*FS, error) {
+type Option int
+
+const (
+	OptPreferJoliet Option = iota
+)
+
+func Open(name string, options ...Option) (*FS, error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewFS(f)
+	return NewFS(f, options...)
 }
 
-func NewFS(r io.ReaderAt) (*FS, error) {
+func NewFS(r io.ReaderAt, options ...Option) (*FS, error) {
 	vds, err := readVolumeDescriptors(r)
 	if err != nil {
 		return nil, err
 	}
 
+	var preferJoliet bool
+	for _, o := range options {
+		switch o {
+		case OptPreferJoliet:
+			preferJoliet = true
+		}
+	}
+
 	var primary *vdPrimary
-	// var supplementary *vdSupplementary
+	var supplementary *vdSupplementary
 
 	for _, vd := range vds {
 		if vd.vType() == vtPrimary {
 			primary = vd.(*vdPrimary)
 		} else if vd.vType() == vtSupplementary && vd.(*vdSupplementary).isJoliet() {
-			// supplementary = vd.(*vdSupplementary)
+			supplementary = vd.(*vdSupplementary)
 		}
 	}
 
@@ -1360,29 +1374,37 @@ func NewFS(r io.ReaderAt) (*FS, error) {
 		return nil, fmt.Errorf("no primary volume descriptor found")
 	}
 
-	root := primary.root
-	logicalBlockSize := int64(primary.logicalBlockSize)
-
 	susp, suspNSkip, rockRidge, err := primary.detectExtensions(r)
 	if err != nil {
 		return nil, fmt.Errorf("error detecting SUSP and Rock Ridge: %v", err)
 	}
 
-	joliet := false
+	var fsys *FS
+	if supplementary != nil && (!rockRidge || preferJoliet) {
+		fsys = &FS{
+			r:                r,
+			root:             supplementary.root,
+			logicalBlockSize: int64(supplementary.logicalBlockSize),
+			susp:             false,
+			suspNSkip:        0,
+			rockRidge:        false,
+			joliet:           true,
+		}
+	} else {
+		fsys = &FS{
+			r:                r,
+			root:             primary.root,
+			logicalBlockSize: int64(primary.logicalBlockSize),
+			susp:             susp,
+			suspNSkip:        suspNSkip,
+			rockRidge:        rockRidge,
+			joliet:           false,
+		}
 
-	fsys := &FS{
-		r:                r,
-		root:             root,
-		logicalBlockSize: logicalBlockSize,
-		susp:             susp,
-		suspNSkip:        suspNSkip,
-		rockRidge:        rockRidge,
-		joliet:           joliet,
-	}
-
-	if rockRidge {
-		if err := root.readRockRidge(fsys); err != nil {
-			return nil, err
+		if rockRidge {
+			if err := fsys.root.readRockRidge(fsys); err != nil {
+				return nil, err
+			}
 		}
 	}
 
