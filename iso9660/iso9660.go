@@ -1303,6 +1303,12 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
+type Option int
+
+const (
+	OptPreferJoliet Option = iota
+)
+
 type FS struct {
 	r                io.ReaderAt
 	root             *dirEntry
@@ -1312,12 +1318,6 @@ type FS struct {
 	rockRidge        bool
 	joliet           bool
 }
-
-type Option int
-
-const (
-	OptPreferJoliet Option = iota
-)
 
 func Open(name string, options ...Option) (*FS, error) {
 	f, err := os.Open(name)
