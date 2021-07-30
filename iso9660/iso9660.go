@@ -79,34 +79,15 @@ const (
 )
 
 type volumeDescriptor interface {
-	vType() vType
-	vTypeDescription() string
+	Type() vType
 }
 
 type vdBase struct {
 	type_ vType
 }
 
-func (vd *vdBase) vType() vType {
+func (vd *vdBase) Type() vType {
 	return vd.type_
-}
-
-func (vd *vdBase) vTypeDescription() string {
-	switch vd.type_ {
-	case vtBoot:
-		return "boot"
-	case vtPrimary:
-		return "primary"
-	case vtSupplementary:
-		return "supplementary"
-	case vtPartition:
-		return "partition"
-	case vtTerminator:
-		return "terminator"
-	default:
-		return "unknown"
-	}
-
 }
 
 type vdBoot struct {
@@ -308,7 +289,7 @@ func readVolumeDescriptors(r io.ReaderAt) ([]volumeDescriptor, error) {
 			return nil, err
 		}
 
-		if vd.vType() == vtTerminator {
+		if vd.Type() == vtTerminator {
 			break
 		}
 
@@ -1365,9 +1346,9 @@ func NewFS(r io.ReaderAt, options ...Option) (*FS, error) {
 	var supplementary *vdSupplementary
 
 	for _, vd := range vds {
-		if vd.vType() == vtPrimary {
+		if vd.Type() == vtPrimary {
 			primary = vd.(*vdPrimary)
-		} else if vd.vType() == vtSupplementary && vd.(*vdSupplementary).isJoliet() {
+		} else if vd.Type() == vtSupplementary && vd.(*vdSupplementary).isJoliet() {
 			supplementary = vd.(*vdSupplementary)
 		}
 	}
