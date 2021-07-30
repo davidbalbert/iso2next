@@ -20,6 +20,8 @@ const sectSize = 2 * kb
 func readBytes(r io.ReaderAt, offset int64, n int) ([]byte, error) {
 	buf := make([]byte, n)
 
+	// No need to check number of bytes read. ReadAt will block until
+	// len(buf) bytes are available or fail with an error.
 	if _, err := r.ReadAt(buf, offset); err != nil {
 		return nil, fmt.Errorf("error reading bytes: %w", err)
 	}
