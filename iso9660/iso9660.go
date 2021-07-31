@@ -100,32 +100,30 @@ type vdPrimary struct {
 	root             *dirEntry
 }
 
-func (vd *vdPrimary) detectExtensions(r io.ReaderAt) (susp bool, suspNSkip int64, rockRidge bool, err error) {
+func (vd *vdPrimary) detectExtensions(r io.ReaderAt) (rockRidge bool, suspNSkip int64, err error) {
 	// The "." entry in the root directory holds the root's system use field.
 	rootSelf, err := readDirEntry(r, int64(vd.root.lba)*int64(vd.logicalBlockSize), false)
 	if err != nil {
-		return false, 0, false, err
+		return false, 0, err
 	}
 
-	susp = isUsingSUSP(rootSelf.systemUseField)
-
-	if susp {
+	if isUsingSUSP(rootSelf.systemUseField) {
 		entries, err := readSystemUseArea(r, rootSelf.systemUseField, int64(vd.logicalBlockSize))
 		if err != nil {
-			return false, 0, false, err
+			return false, 0, err
 		}
 
 		i := findEntry(entries, "SP")
 		if i == -1 {
-			return false, 0, false, fmt.Errorf("no SP entry found")
+			return false, 0, fmt.Errorf("no SP entry found")
 		}
 
-		return true, int64(entries[i].(*spEntry).nSkip), isUsingRockRidge(entries), nil
+		return isUsingRockRidge(entries), int64(entries[i].(*spEntry).nSkip), nil
 	} else {
 		suspNSkip = 0
 		rockRidge = false
 
-		return false, 0, false, nil
+		return false, 0, nil
 	}
 }
 
@@ -1306,14 +1304,14 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 type Option int
 
 const (
-	OptPreferJoliet Option = iota
+	OptNoJoliet Option = iota
+	OptNoRockRidge
 )
 
 type FS struct {
 	r                io.ReaderAt
 	root             *dirEntry
 	logicalBlockSize int64
-	susp             bool
 	suspNSkip        int64
 	rockRidge        bool
 	joliet           bool
@@ -1334,11 +1332,14 @@ func NewFS(r io.ReaderAt, options ...Option) (*FS, error) {
 		return nil, err
 	}
 
-	var preferJoliet bool
+	var noJoliet bool
+	var noRockRidge bool
 	for _, o := range options {
 		switch o {
-		case OptPreferJoliet:
-			preferJoliet = true
+		case OptNoJoliet:
+			noJoliet = true
+		case OptNoRockRidge:
+			noRockRidge = true
 		}
 	}
 
@@ -1357,18 +1358,30 @@ func NewFS(r io.ReaderAt, options ...Option) (*FS, error) {
 		return nil, fmt.Errorf("no primary volume descriptor found")
 	}
 
-	susp, suspNSkip, rockRidge, err := primary.detectExtensions(r)
+	rockRidge, suspNSkip, err := primary.detectExtensions(r)
 	if err != nil {
 		return nil, fmt.Errorf("error detecting SUSP and Rock Ridge: %v", err)
 	}
 
 	var fsys *FS
-	if supplementary != nil && (!rockRidge || preferJoliet) {
+	if rockRidge && !noRockRidge {
+		fsys = &FS{
+			r:                r,
+			root:             primary.root,
+			logicalBlockSize: int64(primary.logicalBlockSize),
+			suspNSkip:        suspNSkip,
+			rockRidge:        true,
+			joliet:           false,
+		}
+
+		if err := fsys.root.readRockRidge(fsys); err != nil {
+			return nil, err
+		}
+	} else if supplementary != nil && !noJoliet {
 		fsys = &FS{
 			r:                r,
 			root:             supplementary.root,
 			logicalBlockSize: int64(supplementary.logicalBlockSize),
-			susp:             false,
 			suspNSkip:        0,
 			rockRidge:        false,
 			joliet:           true,
@@ -1378,16 +1391,9 @@ func NewFS(r io.ReaderAt, options ...Option) (*FS, error) {
 			r:                r,
 			root:             primary.root,
 			logicalBlockSize: int64(primary.logicalBlockSize),
-			susp:             susp,
 			suspNSkip:        suspNSkip,
-			rockRidge:        rockRidge,
+			rockRidge:        false,
 			joliet:           false,
-		}
-
-		if rockRidge {
-			if err := fsys.root.readRockRidge(fsys); err != nil {
-				return nil, err
-			}
 		}
 	}
 
