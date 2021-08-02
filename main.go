@@ -50,17 +50,34 @@ const (
 )
 
 const (
-	dlv1 uint32 = 0x4e655854 // "NeXT"
-	dlv2 uint32 = 0x646c5632 // "dlV2"
-	dlv3 uint32 = 0x646c5633 // "dlV3"
+	dlv1 = "NeXT"
+	dlv2 = "dlV2"
+	dlv3 = "dlV3"
 )
 
 type diskLabel struct {
-	version   uint32
-	label     string
-	driveName string
-	driveType string
-	sectsize  int32
+	version           string
+	label             string
+	flags             uint32
+	tag               uint32
+	driveName         string
+	driveType         string
+	sectsize          int32
+	ntracks           int32
+	nsectors          int32
+	ncylinders        int32
+	rpm               int32
+	frontPorchSectors int16
+	backPorchSectors  int16
+	ngroups           int16
+	agSectors         int16
+	agAlts            int16
+	agSectorOffset    int16
+	bootBlockno       [2]int32
+	kernel            string
+	hostname          string
+	rootPartition     string
+	rwPartition       string
 }
 
 func readDiskLabel(r io.ReaderAt) (*diskLabel, error) {
@@ -69,23 +86,194 @@ func readDiskLabel(r io.ReaderAt) (*diskLabel, error) {
 		return nil, err
 	}
 
-	version := binary.BigEndian.Uint32(buf[:4])
+	version := parseString(buf[:4])
 
+	// TODO: we only actually support version 3.
 	if version != dlv1 && version != dlv2 && version != dlv3 {
 		return nil, fmt.Errorf("can't find nextstep disk label")
 	}
 
 	label := parseString(buf[12:36])
+	flags := binary.BigEndian.Uint32(buf[36:40])
+	tag := binary.BigEndian.Uint32(buf[40:44])
 	driveName := parseString(buf[44:68])
 	driveType := parseString(buf[68:92])
 	sectsize := int32(binary.BigEndian.Uint32(buf[92:96]))
+	ntracks := int32(binary.BigEndian.Uint32(buf[96:100]))
+	nsectors := int32(binary.BigEndian.Uint32(buf[100:104]))
+	ncylinders := int32(binary.BigEndian.Uint32(buf[104:108]))
+	rpm := int32(binary.BigEndian.Uint32(buf[108:112]))
+	frontPorchSectors := int16(binary.BigEndian.Uint16(buf[112:114]))
+	backPorchSectors := int16(binary.BigEndian.Uint16(buf[114:116]))
+	ngroups := int16(binary.BigEndian.Uint16(buf[116:118]))
+	agSectors := int16(binary.BigEndian.Uint16(buf[118:120]))
+	agAlts := int16(binary.BigEndian.Uint16(buf[120:122]))
+	agSectorOffset := int16(binary.BigEndian.Uint16(buf[122:124]))
+	bootBlockno := [2]int32{
+		int32(binary.BigEndian.Uint32(buf[124:128])),
+		int32(binary.BigEndian.Uint32(buf[128:132])),
+	}
+	kernel := parseString(buf[132:156])
+	hostname := parseString(buf[156:188])
+	rootPartition := parseString(buf[188:189])
+	rwPartition := parseString(buf[189:190])
 
 	return &diskLabel{
-		version:   version,
-		label:     label,
-		driveName: driveName,
-		driveType: driveType,
-		sectsize:  sectsize,
+		version:           version,
+		label:             label,
+		flags:             flags,
+		tag:               tag,
+		driveName:         driveName,
+		driveType:         driveType,
+		sectsize:          sectsize,
+		ntracks:           ntracks,
+		nsectors:          nsectors,
+		ncylinders:        ncylinders,
+		rpm:               rpm,
+		frontPorchSectors: frontPorchSectors,
+		backPorchSectors:  backPorchSectors,
+		ngroups:           ngroups,
+		agSectors:         agSectors,
+		agAlts:            agAlts,
+		agSectorOffset:    agSectorOffset,
+		bootBlockno:       bootBlockno,
+		kernel:            kernel,
+		hostname:          hostname,
+		rootPartition:     rootPartition,
+		rwPartition:       rwPartition,
+	}, nil
+}
+
+const (
+	maxPartitions        = 8
+	partitionTableOffset = int64(190)
+	partitionEntrySize   = 46
+)
+
+type partition struct {
+	offset            int32 // in sectors
+	size              int32 // in sectors
+	blocksize         int32 // in bytes
+	fragsize          int32 // in bytes
+	optimizationType  string
+	cylindersPerGroup int16
+	density           int16 // bytes per inode density
+	minfree           int8
+	newfs             bool
+	mountpoint        string
+	automount         bool
+	typeName          string
+}
+
+func parsePartition(buf []byte) (*partition, error) {
+	var p partition
+	p.offset = int32(binary.BigEndian.Uint32(buf[:4]))
+	p.size = int32(binary.BigEndian.Uint32(buf[4:8]))
+	p.blocksize = int32(binary.BigEndian.Uint16(buf[8:10]))
+	p.fragsize = int32(binary.BigEndian.Uint16(buf[10:12]))
+	p.optimizationType = parseString(buf[12:13])
+	p.cylindersPerGroup = int16(binary.BigEndian.Uint16(buf[14:16]))
+	p.density = int16(binary.BigEndian.Uint16(buf[16:18]))
+	p.minfree = int8(buf[18])
+	p.newfs = buf[19] != 0
+	p.mountpoint = parseString(buf[20:36])
+	p.automount = buf[36] != 0
+	p.typeName = parseString(buf[37:45])
+
+	return &p, nil
+}
+
+type offsetReaderAt struct {
+	io.ReaderAt
+	offset int64
+}
+
+func newOffsetReaderAt(r io.ReaderAt, offset int64) *offsetReaderAt {
+	return &offsetReaderAt{r, offset}
+}
+
+func (r *offsetReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	return r.ReaderAt.ReadAt(p, r.offset+off)
+}
+
+type Disk struct {
+	r          io.ReaderAt
+	label      *diskLabel
+	partitions []partition
+}
+
+func Open(name string) (*Disk, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	label, err := readDiskLabel(f)
+	if err != nil {
+		return nil, err
+	}
+
+	offset := partitionTableOffset
+	var partitions []partition
+	for i := 0; i < maxPartitions; i++ {
+		buf, err := readBytes(f, offset, partitionEntrySize)
+		if err != nil {
+			return nil, fmt.Errorf("error reading partition table: %w", err)
+		}
+
+		size := int32(binary.BigEndian.Uint32(buf[4:8]))
+		if size <= 0 {
+			break
+		}
+
+		p, err := parsePartition(buf)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing partition: %w", err)
+		}
+
+		partitions = append(partitions, *p)
+
+		offset += partitionEntrySize
+	}
+
+	return &Disk{
+		r:          f,
+		label:      label,
+		partitions: partitions,
+	}, nil
+}
+
+func (d *Disk) NPart() int {
+	return len(d.partitions)
+}
+
+func (d *Disk) GetPartition(i int) (*FS, error) {
+	if i < 0 || i >= len(d.partitions) {
+		return nil, fmt.Errorf("invalid partition index %d", i)
+	}
+
+	p := d.partitions[i]
+
+	return NewFS(newOffsetReaderAt(d.r, int64(p.offset)*int64(d.label.sectsize)))
+}
+
+func (d *Disk) Close() error {
+	if c, ok := d.r.(io.Closer); ok {
+		return c.Close()
+	}
+
+	return nil
+}
+
+type FS struct {
+	r         io.ReaderAt
+	blocksize int
+	sectsize  int
+}
+
+func NewFS(r io.ReaderAt) (*FS, error) {
+	return &FS{
+		r: r,
 	}, nil
 }
 
@@ -98,18 +286,13 @@ func main() {
 
 	fname := os.Args[1]
 
-	f, err := os.Open(fname)
+	disk, err := Open(fname)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
+	defer disk.Close()
 
-	d, err := readDiskLabel(f)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println(d)
+	fmt.Println(disk.GetPartition(0))
 
 	// r, err := mmap.Open(fname)
 	// if err != nil {
