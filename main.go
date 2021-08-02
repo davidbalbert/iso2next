@@ -254,7 +254,13 @@ func (d *Disk) GetPartition(i int) (*FS, error) {
 
 	p := d.partitions[i]
 
-	return NewFS(newOffsetReaderAt(d.r, int64(p.offset)*int64(d.label.sectsize)))
+	if p.typeName != "4.3BSD" {
+		return nil, fmt.Errorf("unsupported partition type %q", p.typeName)
+	}
+
+	startsect := int64(p.offset) + int64(d.label.frontPorchSectors)
+
+	return NewFS(newOffsetReaderAt(d.r, startsect*int64(d.label.sectsize)))
 }
 
 func (d *Disk) Close() error {
@@ -267,8 +273,8 @@ func (d *Disk) Close() error {
 
 type FS struct {
 	r         io.ReaderAt
-	blocksize int
-	sectsize  int
+	blocksize int32
+	fragsize  int32
 }
 
 func NewFS(r io.ReaderAt) (*FS, error) {
@@ -293,6 +299,7 @@ func main() {
 	defer disk.Close()
 
 	fmt.Println(disk.GetPartition(0))
+	// fmt.Println(disk.label.frontPorchSectors, disk.label.sectsize, disk.partitions)
 
 	// r, err := mmap.Open(fname)
 	// if err != nil {
