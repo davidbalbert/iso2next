@@ -258,9 +258,9 @@ func (d *Disk) GetPartition(i int) (*FS, error) {
 		return nil, fmt.Errorf("unsupported partition type %q", p.typeName)
 	}
 
-	startsect := int64(p.offset) + int64(d.label.frontPorchSectors)
+	start := (int64(p.offset) + int64(d.label.frontPorchSectors)) * int64(d.label.sectsize)
 
-	return NewFS(newOffsetReaderAt(d.r, startsect*int64(d.label.sectsize)))
+	return NewFS(newOffsetReaderAt(d.r, start))
 }
 
 func (d *Disk) Close() error {
@@ -271,15 +271,67 @@ func (d *Disk) Close() error {
 	return nil
 }
 
+const (
+	ufsMagic uint32 = 0x011954
+)
+
+type superblock struct {
+	nfrag       uint32
+	ngroup      uint32
+	blocksize   uint32
+	fragsize    uint32
+	ipg         uint32 // inodes per group
+	fpg         uint32 // fragments per group
+	symlinkMax  uint32
+	inodeFormat uint32
+	signature   uint32
+}
+
+func parseSuperblock(buf []byte) (*superblock, error) {
+	var s superblock
+
+	signature := binary.BigEndian.Uint32(buf[1372:1376])
+	if signature != ufsMagic {
+		return nil, fmt.Errorf("invalid UFS signature %x", signature)
+	}
+
+	s.nfrag = binary.BigEndian.Uint32(buf[36:40])
+	s.ngroup = binary.BigEndian.Uint32(buf[44:48])
+	s.blocksize = binary.BigEndian.Uint32(buf[48:52])
+	s.fragsize = binary.BigEndian.Uint32(buf[52:56])
+
+	s.ipg = binary.BigEndian.Uint32(buf[184:188])
+	s.fpg = binary.BigEndian.Uint32(buf[188:192])
+
+	s.symlinkMax = binary.BigEndian.Uint32(buf[1320:1324])
+	s.inodeFormat = binary.BigEndian.Uint32(buf[1324:1328])
+
+	s.signature = signature
+
+	return &s, nil
+}
+
 type FS struct {
-	r         io.ReaderAt
-	blocksize int32
-	fragsize  int32
+	r  io.ReaderAt
+	sb *superblock
 }
 
 func NewFS(r io.ReaderAt) (*FS, error) {
+	buf, err := readBytes(r, 8*kb, 1376)
+	if err != nil {
+		return nil, fmt.Errorf("error reading superblock: %w", err)
+	}
+
+	sb, err := parseSuperblock(buf)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing superblock: %w", err)
+	}
+
+	fmt.Println(sb)
+
 	return &FS{
-		r: r,
+		r:  r,
+		sb: sb,
 	}, nil
 }
 
