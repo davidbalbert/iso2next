@@ -273,9 +273,16 @@ func (d *Disk) Close() error {
 
 const (
 	ufsMagic uint32 = 0x011954
+	sbsize   int    = 1376
 )
 
 type superblock struct {
+	sblkno      uint32
+	cblkno      uint32
+	iblkno      uint32
+	dblkno      uint32
+	cgoffset    uint32
+	cgmask      uint32
 	nfrag       uint32
 	ngroup      uint32
 	blocksize   uint32
@@ -294,6 +301,13 @@ func parseSuperblock(buf []byte) (*superblock, error) {
 	if signature != ufsMagic {
 		return nil, fmt.Errorf("invalid UFS signature %x", signature)
 	}
+
+	s.sblkno = binary.BigEndian.Uint32(buf[8:12])
+	s.cblkno = binary.BigEndian.Uint32(buf[12:16])
+	s.iblkno = binary.BigEndian.Uint32(buf[16:20])
+	s.dblkno = binary.BigEndian.Uint32(buf[20:24])
+	s.cgoffset = binary.BigEndian.Uint32(buf[24:28])
+	s.cgmask = binary.BigEndian.Uint32(buf[28:32])
 
 	s.nfrag = binary.BigEndian.Uint32(buf[36:40])
 	s.ngroup = binary.BigEndian.Uint32(buf[44:48])
@@ -317,7 +331,7 @@ type FS struct {
 }
 
 func NewFS(r io.ReaderAt) (*FS, error) {
-	buf, err := readBytes(r, 8*kb, 1376)
+	buf, err := readBytes(r, 8*kb, sbsize)
 	if err != nil {
 		return nil, fmt.Errorf("error reading superblock: %w", err)
 	}
