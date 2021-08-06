@@ -322,7 +322,31 @@ func parseSuperblock(buf []byte) (*superblock, error) {
 
 	s.signature = signature
 
+	if s.inodeFormat != 0xffffffff {
+		return nil, fmt.Errorf("unsupported inode format %x", s.inodeFormat)
+	}
+
 	return &s, nil
+}
+
+func (sb *superblock) groupBase(group int) int {
+	return group*int(sb.fpg) + int(sb.cgoffset*(uint32(group) & ^sb.cgmask))
+}
+
+func (sb *superblock) sblockno(group int) int {
+	return sb.groupBase(group) + int(sb.sblkno)
+}
+
+func (sb *superblock) cblockno(group int) int {
+	return sb.groupBase(group) + int(sb.cblkno)
+}
+
+func (sb *superblock) iblockno(group int) int {
+	return sb.groupBase(group) + int(sb.iblkno)
+}
+
+func (sb *superblock) dblockno(group int) int {
+	return sb.groupBase(group) + int(sb.dblkno)
 }
 
 type FS struct {
@@ -341,7 +365,9 @@ func NewFS(r io.ReaderAt) (*FS, error) {
 		return nil, fmt.Errorf("error parsing superblock: %w", err)
 	}
 
-	fmt.Println(sb)
+	for i := 0; i < int(sb.ngroup); i++ {
+		fmt.Println(sb.sblockno(i))
+	}
 
 	return &FS{
 		r:  r,
