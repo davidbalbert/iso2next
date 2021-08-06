@@ -277,16 +277,19 @@ const (
 )
 
 type superblock struct {
-	sblkno      uint32
-	cblkno      uint32
-	iblkno      uint32
-	dblkno      uint32
-	cgoffset    uint32
-	cgmask      uint32
-	nfrag       uint32
-	ngroup      uint32
-	blocksize   uint32
-	fragsize    uint32
+	sblkno    uint32
+	cblkno    uint32
+	iblkno    uint32
+	dblkno    uint32
+	cgoffset  uint32
+	cgmask    uint32
+	nfrag     uint32
+	ngroup    uint32
+	blocksize uint32
+	fragsize  uint32
+
+	ipb uint32 // inodes per block
+
 	ipg         uint32 // inodes per group
 	fpg         uint32 // fragments per group
 	symlinkMax  uint32
@@ -314,6 +317,8 @@ func parseSuperblock(buf []byte) (*superblock, error) {
 	s.blocksize = binary.BigEndian.Uint32(buf[48:52])
 	s.fragsize = binary.BigEndian.Uint32(buf[52:56])
 
+	s.ipb = binary.BigEndian.Uint32(buf[120:124])
+
 	s.ipg = binary.BigEndian.Uint32(buf[184:188])
 	s.fpg = binary.BigEndian.Uint32(buf[188:192])
 
@@ -329,24 +334,24 @@ func parseSuperblock(buf []byte) (*superblock, error) {
 	return &s, nil
 }
 
-func (sb *superblock) groupBase(group int) int {
-	return group*int(sb.fpg) + int(sb.cgoffset*(uint32(group) & ^sb.cgmask))
+func (sb *superblock) groupBase(group uint32) uint32 {
+	return group*sb.fpg + sb.cgoffset*(group & ^sb.cgmask)
 }
 
-func (sb *superblock) sblockno(group int) int {
-	return sb.groupBase(group) + int(sb.sblkno)
+func (sb *superblock) sblockno(group uint32) uint32 {
+	return sb.groupBase(group) + sb.sblkno
 }
 
-func (sb *superblock) cblockno(group int) int {
-	return sb.groupBase(group) + int(sb.cblkno)
+func (sb *superblock) cblockno(group uint32) uint32 {
+	return sb.groupBase(group) + sb.cblkno
 }
 
-func (sb *superblock) iblockno(group int) int {
-	return sb.groupBase(group) + int(sb.iblkno)
+func (sb *superblock) iblockno(group uint32) uint32 {
+	return sb.groupBase(group) + sb.iblkno
 }
 
-func (sb *superblock) dblockno(group int) int {
-	return sb.groupBase(group) + int(sb.dblkno)
+func (sb *superblock) dblockno(group uint32) uint32 {
+	return sb.groupBase(group) + sb.dblkno
 }
 
 type FS struct {
@@ -365,14 +370,154 @@ func NewFS(r io.ReaderAt) (*FS, error) {
 		return nil, fmt.Errorf("error parsing superblock: %w", err)
 	}
 
-	for i := 0; i < int(sb.ngroup); i++ {
-		fmt.Println(sb.sblockno(i))
-	}
-
 	return &FS{
 		r:  r,
 		sb: sb,
 	}, nil
+}
+
+func (fsys *FS) readi(ino uint32) (*inode, error) {
+	if ino > fsys.sb.ipg*fsys.sb.ngroup {
+		return nil, fmt.Errorf("invalid inode number %d", ino)
+	}
+
+	group := ino / fsys.sb.ipg
+	block := fsys.sb.iblockno(group) + ino/fsys.sb.ipb
+
+	offset := int64(block)*int64(fsys.sb.fragsize) + int64(ino)*int64(inodeSize)
+
+	buf, err := readBytes(fsys.r, offset, inodeSize)
+	if err != nil {
+		return nil, fmt.Errorf("can't read inode: %w", err)
+	}
+
+	inode := parseInode(buf)
+
+	return inode, nil
+}
+
+func (fsys *FS) Open(name string) (fs.File, error) {
+	// ino, err := fsys.lookup(name)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	inode, err := fsys.readi(rootInode)
+	if err != nil {
+		return nil, err
+	}
+
+	return newFile(fsys, inode), nil
+}
+
+type dirEntry struct {
+}
+
+type file struct {
+	fsys *FS
+	*inode
+	offset int64
+}
+
+func (f *file) Read(p []byte) (int, error) {
+	return 0, fmt.Errorf("not implemented")
+
+	// if f.inode.Type().IsDir() {
+	// 	return 0, fmt.Errorf("can't call Read on a directory")
+	// }
+
+	// if len(p) == 0 {
+	// 	return 0, nil
+	// } else if f.offset >= f.inode.size {
+	// 	return 0, io.EOF
+	// }
+
+	// n, err := f.readAt(p, f.offset)
+	// f.offset += int64(n)
+
+	// return n, err
+}
+
+func (f *file) Close() error {
+	return nil
+}
+
+func newFile(fsys *FS, ip *inode) *file {
+	return &file{
+		fsys:   fsys,
+		inode:  ip,
+		offset: 0,
+	}
+}
+
+const (
+	inodeSize = 128
+	ndirect   = 12
+	nindirect = 3
+	rootInode = 2
+)
+
+type inode struct {
+	mode      uint16
+	nlink     uint16
+	size      uint64
+	atime     uint32
+	atimensec uint32
+	mtime     uint32
+	mtimensec uint32
+	ctime     uint32
+	ctimensec uint32
+
+	dblocks []uint32
+	iblocks []uint32
+
+	flags      uint32
+	blocksHeld uint32
+	gen        int32
+	uid        uint32
+	gid        uint32
+}
+
+func parseInode(buf []byte) *inode {
+	var inode inode
+
+	inode.mode = binary.BigEndian.Uint16(buf[0:2])
+	inode.nlink = binary.BigEndian.Uint16(buf[2:4])
+	inode.size = binary.BigEndian.Uint64(buf[8:16])
+	inode.atime = binary.BigEndian.Uint32(buf[16:20])
+	inode.atimensec = binary.BigEndian.Uint32(buf[20:24])
+	inode.mtime = binary.BigEndian.Uint32(buf[24:28])
+	inode.mtimensec = binary.BigEndian.Uint32(buf[28:32])
+	inode.ctime = binary.BigEndian.Uint32(buf[32:36])
+	inode.ctimensec = binary.BigEndian.Uint32(buf[36:40])
+
+	for i := 0; i < ndirect; i++ {
+		block := binary.BigEndian.Uint32(buf[40+i*4 : 44+i*4])
+
+		if block == 0 {
+			break
+		}
+
+		inode.dblocks = append(inode.dblocks, block)
+	}
+
+	for i := 0; i < nindirect; i++ {
+		block := binary.BigEndian.Uint32(buf[88+i*4 : 92+i*4])
+
+		if block == 0 {
+			break
+		}
+
+		inode.iblocks = append(inode.iblocks, block)
+	}
+
+	inode.flags = binary.BigEndian.Uint32(buf[100:104])
+	inode.blocksHeld = binary.BigEndian.Uint32(buf[104:108])
+	inode.gen = int32(binary.BigEndian.Uint32(buf[108:112]))
+	inode.uid = binary.BigEndian.Uint32(buf[112:116])
+	inode.gid = binary.BigEndian.Uint32(buf[116:120])
+
+	return &inode
 }
 
 func main() {
@@ -390,7 +535,12 @@ func main() {
 	}
 	defer disk.Close()
 
-	fmt.Println(disk.GetPartition(0))
+	fsys, err := disk.GetPartition(0)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(fsys.readi(2))
 	// fmt.Println(disk.label.frontPorchSectors, disk.label.sectsize, disk.partitions)
 
 	// r, err := mmap.Open(fname)
