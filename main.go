@@ -40,6 +40,15 @@ func readBytes(r io.ReaderAt, offset int64, n int) ([]byte, error) {
 	return buf, nil
 }
 
+func readByte(r io.ReaderAt, offset int64) (byte, error) {
+	buf, err := readBytes(r, offset, 1)
+	if err != nil {
+		return 0, err
+	}
+
+	return buf[0], nil
+}
+
 func parseString(buf []byte) string {
 	return string(bytes.TrimRight(buf, "\x00"))
 }
@@ -376,7 +385,7 @@ func NewFS(r io.ReaderAt) (*FS, error) {
 	}, nil
 }
 
-func (fsys *FS) readi(ino uint32) (*inode, error) {
+func (fsys *FS) readInode(ino uint32, name string) (*inode, error) {
 	if ino > fsys.sb.ipg*fsys.sb.ngroup {
 		return nil, fmt.Errorf("invalid inode number %d", ino)
 	}
@@ -391,7 +400,7 @@ func (fsys *FS) readi(ino uint32) (*inode, error) {
 		return nil, fmt.Errorf("can't read inode: %w", err)
 	}
 
-	inode := parseInode(buf)
+	inode := parseInode(buf, name, fsys)
 
 	return inode, nil
 }
@@ -402,7 +411,7 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	// 	return nil, err
 	// }
 
-	inode, err := fsys.readi(rootInode)
+	inode, err := fsys.readInode(rootInode, ".")
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +419,103 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	return newFile(fsys, inode), nil
 }
 
+const (
+	ftUnknown  byte = 0
+	ftFifo          = 1
+	ftChar          = 2
+	ftDir           = 4
+	ftBlock         = 6
+	ftRegular       = 8
+	ftSymlink       = 10
+	ftSocket        = 12
+	ftWhiteout      = 14
+)
+
 type dirEntry struct {
+	ino uint32
+	len uint16
+	// 4.4 BSD uses half of the namlen field for filetype.
+	// NeXTSTEP uses the older dirent format that has a 2 byte
+	// namlen, even though we shouldn't expect to same names
+	// longer than 255 bytes. We use the old format.
+	//
+	// If we ever support the new format, the File System
+	// Forensic Analysis book has namelen coming before
+	// filetype, but the Linux source and the NetBSD source
+	// have filetype before namelen. The book is probably wrong.
+	// implement it like this:
+	//
+	// filetype byte
+	// nameLen byte
+
+	nameLen uint16
+	name    string
+}
+
+func readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
+	buf, err := readBytes(r, offset+6, 2)
+	if err != nil {
+		return nil, fmt.Errorf("can't read directory entry name length: %w", err)
+	}
+
+	nameLen := binary.BigEndian.Uint16(buf)
+
+	buf, err = readBytes(r, offset, 8+int(nameLen))
+	if err != nil {
+		return nil, fmt.Errorf("can't read directory entry: %w", err)
+	}
+
+	return parseDirEntry(buf), nil
+}
+
+func parseDirEntry(buf []byte) *dirEntry {
+	nameLen := binary.BigEndian.Uint16(buf[6:8])
+
+	return &dirEntry{
+		ino:     binary.BigEndian.Uint32(buf[0:4]),
+		len:     binary.BigEndian.Uint16(buf[4:6]),
+		nameLen: nameLen,
+		name:    string(buf[8 : 8+int(nameLen)]),
+	}
+}
+
+func (d *dirEntry) Info() (fs.FileInfo, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (d *dirEntry) IsDir() bool {
+	// return d.filetype == ftDir
+	return false
+}
+
+func (d *dirEntry) Name() string {
+	return d.name
+}
+
+func (d *dirEntry) Type() fs.FileMode {
+	// switch d.filetype {
+	// case ftUnknown:
+	// 	return fs.ModeIrregular
+	// case ftFifo:
+	// 	return fs.ModeNamedPipe
+	// case ftChar:
+	// 	return fs.ModeDevice | fs.ModeCharDevice
+	// case ftDir:
+	// 	return fs.ModeDir
+	// case ftBlock:
+	// 	return fs.ModeDevice
+	// case ftRegular:
+	// 	return 0
+	// case ftSymlink:
+	// 	return fs.ModeSymlink
+	// case ftSocket:
+	// 	return fs.ModeDevice
+	// case ftWhiteout:
+	// 	return fs.ModeIrregular
+	// default:
+	// 	return fs.ModeIrregular
+	// }
+	return fs.ModeIrregular
 }
 
 type file struct {
@@ -419,12 +524,20 @@ type file struct {
 	offset int64
 }
 
-func (f *file) Read(p []byte) (int, error) {
-	return 0, fmt.Errorf("not implemented")
+func newFile(fsys *FS, ip *inode) *file {
+	return &file{
+		fsys:   fsys,
+		inode:  ip,
+		offset: 0,
+	}
+}
 
-	// if f.inode.Type().IsDir() {
-	// 	return 0, fmt.Errorf("can't call Read on a directory")
-	// }
+func (f *file) Read(p []byte) (int, error) {
+	if f.inode.IsDir() {
+		return 0, fmt.Errorf("can't call Read on a directory")
+	}
+
+	return 0, fmt.Errorf("not implemented")
 
 	// if len(p) == 0 {
 	// 	return 0, nil
@@ -438,16 +551,50 @@ func (f *file) Read(p []byte) (int, error) {
 	// return n, err
 }
 
-func (f *file) Close() error {
-	return nil
+func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
+	if !f.inode.IsDir() {
+		return nil, fmt.Errorf("can't call ReadDir on a file")
+	}
+
+	var entries []fs.DirEntry
+	if n > 0 {
+		entries = make([]fs.DirEntry, 0, n)
+	} else {
+		entries = make([]fs.DirEntry, 0, 100)
+	}
+
+	for len(entries) < n || n <= 0 {
+		if f.offset >= f.inode.Size() {
+			break
+		}
+
+		dirent, err := readDirEntry(f.inode, f.offset)
+		if err != nil {
+			return entries, err
+		}
+
+		f.offset += int64(dirent.len)
+
+		if dirent.name == "." || dirent.name == ".." {
+			continue
+		}
+
+		entries = append(entries, dirent)
+	}
+
+	if n > 0 && len(entries) == 0 {
+		return nil, io.EOF
+	}
+
+	return entries, nil
 }
 
-func newFile(fsys *FS, ip *inode) *file {
-	return &file{
-		fsys:   fsys,
-		inode:  ip,
-		offset: 0,
-	}
+func (f *file) Stat() (fs.FileInfo, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (f *file) Close() error {
+	return nil
 }
 
 const (
@@ -458,6 +605,9 @@ const (
 )
 
 type inode struct {
+	name string
+	fsys *FS
+
 	mode      uint16
 	nlink     uint16
 	size      uint64
@@ -478,8 +628,11 @@ type inode struct {
 	gid        uint32
 }
 
-func parseInode(buf []byte) *inode {
+func parseInode(buf []byte, name string, fsys *FS) *inode {
 	var inode inode
+
+	inode.name = name
+	inode.fsys = fsys
 
 	inode.mode = binary.BigEndian.Uint16(buf[0:2])
 	inode.nlink = binary.BigEndian.Uint16(buf[2:4])
@@ -520,6 +673,73 @@ func parseInode(buf []byte) *inode {
 	return &inode
 }
 
+func (ip *inode) IsDir() bool {
+	return true
+}
+
+func (ip *inode) Size() int64 {
+	return int64(ip.size)
+}
+
+func (ip *inode) blockno(idx int) (uint32, error) {
+	if idx >= ndirect {
+		return 0, fmt.Errorf("can't read indirect block")
+	}
+
+	return ip.dblocks[idx], nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	} else {
+		return b
+	}
+}
+
+func (ip *inode) ReadAt(p []byte, off int64) (n int, err error) {
+	if off >= ip.Size() {
+		return 0, io.EOF
+	}
+
+	if off+int64(len(p)) > ip.Size() {
+		p = p[:ip.Size()-off]
+		err = io.EOF
+	}
+
+	blocksize := int64(ip.fsys.sb.blocksize)
+	fragsize := int64(ip.fsys.sb.fragsize)
+	nblocks := int(ip.Size()/blocksize) + 1
+
+	for n < len(p) {
+		idx := int(off / blocksize)
+
+		addr, err := ip.blockno(idx)
+		if err != nil {
+			return n, err
+		}
+
+		var toRead int
+		// we're reading fragments
+		if idx == nblocks-1 {
+			toRead = len(p) - n
+		} else {
+			toRead = min(int(blocksize), int(len(p)-n))
+		}
+
+		m, err := ip.fsys.r.ReadAt(p[n:n+toRead], int64(addr)*fragsize+(off%blocksize))
+		n += m
+
+		if err != nil {
+			return n, err
+		}
+
+		off += int64(m)
+	}
+
+	return n, err
+}
+
 func main() {
 	log.SetFlags(0)
 
@@ -540,7 +760,25 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Println(fsys.readi(2))
+	f, err := fsys.Open(".")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+	if f, ok := f.(fs.ReadDirFile); ok {
+		dirents, err := f.ReadDir(0)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for _, dirent := range dirents {
+			log.Println(dirent)
+		}
+	} else {
+		log.Fatal("not a directory")
+	}
+
 	// fmt.Println(disk.label.frontPorchSectors, disk.label.sectsize, disk.partitions)
 
 	// r, err := mmap.Open(fname)
