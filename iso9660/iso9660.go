@@ -1425,15 +1425,15 @@ func (fsys *FS) walk(name string) (*dirEntry, error) {
 
 		f := &file{fsys, dirent, 0}
 		for {
-			child, err := f.ReadDir(1)
+			children, err := f.ReadDir(1)
 			if err == io.EOF {
 				return nil, fs.ErrNotExist
 			} else if err != nil {
 				return nil, err
 			}
 
-			if contains(candidates, child[0].Name()) {
-				dirent = child[0].(*dirEntry)
+			if contains(candidates, children[0].Name()) {
+				dirent = children[0].(*dirEntry)
 				break
 			}
 		}
