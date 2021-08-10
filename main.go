@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -31,15 +32,6 @@ func readBytes(r io.ReaderAt, offset int64, n int) ([]byte, error) {
 	}
 
 	return buf, nil
-}
-
-func readByte(r io.ReaderAt, offset int64) (byte, error) {
-	buf, err := readBytes(r, offset, 1)
-	if err != nil {
-		return 0, err
-	}
-
-	return buf[0], nil
 }
 
 func parseString(buf []byte) string {
@@ -398,15 +390,58 @@ func (fsys *FS) readInode(ino uint32, name string) (*inode, error) {
 	return inode, nil
 }
 
-func (fsys *FS) Open(name string) (fs.File, error) {
-	// ino, err := fsys.lookup(name)
-	// if err != nil {
-	// 	return nil, err
-	// }
+func (fsys *FS) walk(name string) (*inode, error) {
+	pathComponents := strings.Split(name, "/")
+
+	if pathComponents[0] == "." {
+		pathComponents = pathComponents[1:]
+	}
 
 	inode, err := fsys.readInode(rootInode, ".")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading root inode: %w", err)
+	}
+
+	for i, component := range pathComponents {
+		last := i == len(pathComponents)-1
+
+		f := newFile(fsys, inode)
+		for {
+			children, err := f.ReadDir(1)
+			if err == io.EOF {
+				return nil, fs.ErrNotExist
+			} else if err != nil {
+				return nil, err
+			}
+
+			child, ok := children[0].(*dirEntry)
+			if !ok {
+				return nil, fmt.Errorf("unexpected directory entry type %T", children[0])
+			}
+
+			if child.Name() == component {
+				// For new-format directory entries, we need to read the inode here
+				inode = child.inode
+				break
+			}
+		}
+
+		if !last && !inode.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", component)
+		}
+	}
+
+	return inode, nil
+}
+
+func (fsys *FS) Open(name string) (fs.File, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+
+	inode, err := fsys.walk(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
 
 	return newFile(fsys, inode), nil
@@ -455,7 +490,7 @@ func (fsys *FS) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
 	// include file type. Because fs.DirEntry has a Type() method, we have
 	// to read the inode so that we can get the type. This is unfortunate.
 	//
-	// If we ever add support for the newer directory entry format, we can
+	// If we ever add support for the new-format directory entries, we can
 	// return early without reading the inode.
 
 	ip, err := fsys.readInode(dirent.ino, dirent.name)
@@ -480,7 +515,7 @@ func parseDirEntry(buf []byte) *dirEntry {
 }
 
 func (d *dirEntry) Info() (fs.FileInfo, error) {
-	// If we add support for the new directory entry format, we can
+	// If we add support for new-format directory entries, we can
 	// delay reading of the inode until here. Something like
 	//
 	// if d.inode == nil {
@@ -577,7 +612,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
-	return nil, fmt.Errorf("not implemented")
+	return f.inode, nil
 }
 
 func (f *file) Close() error {
@@ -672,9 +707,49 @@ func (ip *inode) ModTime() time.Time {
 	return time.Unix(int64(ip.mtime), int64(ip.mtimensec))
 }
 
+const (
+	imSticky  uint16 = 0x200
+	imSgid    uint16 = 0x400
+	imSuid    uint16 = 0x800
+	imFifo    uint16 = 0x1000
+	imChar    uint16 = 0x2000
+	imDir     uint16 = 0x4000
+	imBlock   uint16 = 0x6000
+	imFile    uint16 = 0x8000
+	imSymlink uint16 = 0xa000
+	imSocket  uint16 = 0xc000
+)
+
 func (ip *inode) Mode() fs.FileMode {
-	// TODO: implement
-	return 0
+	mode := fs.FileMode(ip.mode & 0777)
+
+	if ip.mode&imSticky == imSticky {
+		mode |= fs.ModeSticky
+	}
+	if ip.mode&imSgid == imSgid {
+		mode |= fs.ModeSetgid
+	}
+	if ip.mode&imSuid == imSuid {
+		mode |= fs.ModeSetuid
+	}
+
+	if ip.mode&imSocket == imSocket {
+		mode |= fs.ModeSocket
+	} else if ip.mode&imSymlink == imSymlink {
+		mode |= fs.ModeSymlink
+	} else if ip.mode&imBlock == imBlock {
+		mode |= fs.ModeDevice
+	} else if ip.mode&imDir == imDir {
+		mode |= fs.ModeDir
+	} else if ip.mode&imChar == imChar {
+		mode |= fs.ModeCharDevice | fs.ModeDevice
+	} else if ip.mode&imFifo == imFifo {
+		mode |= fs.ModeNamedPipe
+	} else if ip.mode&imFile != imFile {
+		mode |= fs.ModeIrregular
+	}
+
+	return mode
 }
 
 func (ip *inode) Name() string {
@@ -772,24 +847,24 @@ func main() {
 		log.Fatal(err)
 	}
 
-	f, err := fsys.Open(".")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
+	// f, err := fsys.Open(".")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer f.Close()
 
-	if f, ok := f.(fs.ReadDirFile); ok {
-		dirents, err := f.ReadDir(0)
-		if err != nil {
-			log.Fatal(err)
-		}
+	// if f, ok := f.(fs.ReadDirFile); ok {
+	// 	dirents, err := f.ReadDir(0)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
 
-		for _, dirent := range dirents {
-			log.Println(dirent)
-		}
-	} else {
-		log.Fatal("not a directory")
-	}
+	// 	for _, dirent := range dirents {
+	// 		log.Println(dirent)
+	// 	}
+	// } else {
+	// 	log.Fatal("not a directory")
+	// }
 
 	// fmt.Println(disk.label.frontPorchSectors, disk.label.sectsize, disk.partitions)
 
@@ -804,48 +879,48 @@ func main() {
 	// 	log.Fatal(err)
 	// }
 
-	// err = fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
-	// 	if err != nil {
-	// 		return err
-	// 	}
+	err = fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 
-	// 	info, err := dirent.Info()
-	// 	if err != nil {
-	// 		return err
-	// 	}
+		info, err := dirent.Info()
+		if err != nil {
+			return err
+		}
 
-	// 	fmt.Printf("%s\t", info.Mode().String())
+		fmt.Printf("%s\t", info.Mode().String())
 
-	// 	if dirent, ok := dirent.(DeviceDirEntry); info.Mode()&fs.ModeDevice != 0 && ok {
-	// 		dev, err := dirent.Device()
-	// 		if err != nil {
-	// 			return err
-	// 		}
+		if dirent, ok := dirent.(DeviceDirEntry); info.Mode()&fs.ModeDevice != 0 && ok {
+			dev, err := dirent.Device()
+			if err != nil {
+				return err
+			}
 
-	// 		fmt.Printf("%d, %d\t", major(dev), minor(dev))
-	// 	} else {
-	// 		fmt.Printf("%d\t", info.Size())
-	// 	}
+			fmt.Printf("%d, %d\t", major(dev), minor(dev))
+		} else {
+			fmt.Printf("%d\t", info.Size())
+		}
 
-	// 	if path == "." {
-	// 		fmt.Print("/")
-	// 	} else {
-	// 		fmt.Printf("/%s", path)
-	// 	}
+		if path == "." {
+			fmt.Print("/")
+		} else {
+			fmt.Printf("/%s", path)
+		}
 
-	// 	if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
-	// 		target, err := dirent.Readlink()
-	// 		if err != nil {
-	// 			return err
-	// 		}
+		if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
+			target, err := dirent.Readlink()
+			if err != nil {
+				return err
+			}
 
-	// 		fmt.Printf(" -> %s", target)
-	// 	}
-	// 	fmt.Println()
+			fmt.Printf(" -> %s", target)
+		}
+		fmt.Println()
 
-	// 	return nil
-	// })
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 }
