@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"time"
 )
 
 type ReadlinkDirEntry interface {
@@ -18,14 +19,6 @@ type ReadlinkDirEntry interface {
 type DeviceDirEntry interface {
 	fs.DirEntry
 	Device() (uint64, error)
-}
-
-func major(dev uint64) uint64 {
-	return dev >> 32
-}
-
-func minor(dev uint64) uint64 {
-	return dev & 0xffffffff
 }
 
 func readBytes(r io.ReaderAt, offset int64, n int) ([]byte, error) {
@@ -393,7 +386,7 @@ func (fsys *FS) readInode(ino uint32, name string) (*inode, error) {
 	group := ino / fsys.sb.ipg
 	block := fsys.sb.iblockno(group) + ino/fsys.sb.ipb
 
-	offset := int64(block)*int64(fsys.sb.fragsize) + int64(ino)*int64(inodeSize)
+	offset := int64(block)*int64(fsys.sb.fragsize) + int64(ino%fsys.sb.ipb)*int64(inodeSize)
 
 	buf, err := readBytes(fsys.r, offset, inodeSize)
 	if err != nil {
@@ -419,21 +412,13 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	return newFile(fsys, inode), nil
 }
 
-const (
-	ftUnknown  byte = 0
-	ftFifo          = 1
-	ftChar          = 2
-	ftDir           = 4
-	ftBlock         = 6
-	ftRegular       = 8
-	ftSymlink       = 10
-	ftSocket        = 12
-	ftWhiteout      = 14
-)
-
 type dirEntry struct {
+	fsys  *FS
+	inode *inode
+
 	ino uint32
 	len uint16
+
 	// 4.4 BSD uses half of the namlen field for filetype.
 	// NeXTSTEP uses the older dirent format that has a 2 byte
 	// namlen, even though we shouldn't expect to same names
@@ -447,12 +432,12 @@ type dirEntry struct {
 	//
 	// filetype byte
 	// nameLen byte
-
 	nameLen uint16
-	name    string
+
+	name string
 }
 
-func readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
+func (fsys *FS) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
 	buf, err := readBytes(r, offset+6, 2)
 	if err != nil {
 		return nil, fmt.Errorf("can't read directory entry name length: %w", err)
@@ -465,7 +450,24 @@ func readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
 		return nil, fmt.Errorf("can't read directory entry: %w", err)
 	}
 
-	return parseDirEntry(buf), nil
+	dirent := parseDirEntry(buf)
+	dirent.fsys = fsys
+
+	// NeXTSTEP's UFS uses the old directory entry format, which doesn't
+	// include file type. Because fs.DirEntry has a Type() method, we have
+	// to read the inode so that we can get the type. This is unfortunate.
+	//
+	// If we ever add support for the newer directory entry format, we can
+	// return early without reading the inode.
+
+	ip, err := fsys.readInode(dirent.ino, dirent.name)
+	if err != nil {
+		return nil, err
+	}
+
+	dirent.inode = ip
+
+	return dirent, nil
 }
 
 func parseDirEntry(buf []byte) *dirEntry {
@@ -480,12 +482,21 @@ func parseDirEntry(buf []byte) *dirEntry {
 }
 
 func (d *dirEntry) Info() (fs.FileInfo, error) {
-	return nil, fmt.Errorf("not implemented")
+	// If we add support for the new directory entry format, we can
+	// delay reading of the inode until here. Something like
+	//
+	// if d.inode == nil {
+	// 	d.inode, err := fsys.readInode(d.ino, d.name)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// }
+
+	return d.inode, nil
 }
 
 func (d *dirEntry) IsDir() bool {
-	// return d.filetype == ftDir
-	return false
+	return d.inode.IsDir()
 }
 
 func (d *dirEntry) Name() string {
@@ -493,29 +504,7 @@ func (d *dirEntry) Name() string {
 }
 
 func (d *dirEntry) Type() fs.FileMode {
-	// switch d.filetype {
-	// case ftUnknown:
-	// 	return fs.ModeIrregular
-	// case ftFifo:
-	// 	return fs.ModeNamedPipe
-	// case ftChar:
-	// 	return fs.ModeDevice | fs.ModeCharDevice
-	// case ftDir:
-	// 	return fs.ModeDir
-	// case ftBlock:
-	// 	return fs.ModeDevice
-	// case ftRegular:
-	// 	return 0
-	// case ftSymlink:
-	// 	return fs.ModeSymlink
-	// case ftSocket:
-	// 	return fs.ModeDevice
-	// case ftWhiteout:
-	// 	return fs.ModeIrregular
-	// default:
-	// 	return fs.ModeIrregular
-	// }
-	return fs.ModeIrregular
+	return d.inode.Mode().Type()
 }
 
 type file struct {
@@ -568,7 +557,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			break
 		}
 
-		dirent, err := readDirEntry(f.inode, f.offset)
+		dirent, err := f.fsys.readDirEntry(f.inode, f.offset)
 		if err != nil {
 			return entries, err
 		}
@@ -611,11 +600,11 @@ type inode struct {
 	mode      uint16
 	nlink     uint16
 	size      uint64
-	atime     uint32
+	atime     uint32 // access time
 	atimensec uint32
-	mtime     uint32
+	mtime     uint32 // modification time
 	mtimensec uint32
-	ctime     uint32
+	ctime     uint32 // metadata change time
 	ctimensec uint32
 
 	dblocks []uint32
@@ -681,6 +670,23 @@ func (ip *inode) Size() int64 {
 	return int64(ip.size)
 }
 
+func (ip *inode) ModTime() time.Time {
+	return time.Unix(int64(ip.mtime), int64(ip.mtimensec))
+}
+
+func (ip *inode) Mode() fs.FileMode {
+	// TODO: implement
+	return 0
+}
+
+func (ip *inode) Name() string {
+	return ip.name
+}
+
+func (ip *inode) Sys() interface{} {
+	return nil
+}
+
 func (ip *inode) blockno(idx int) (uint32, error) {
 	if idx >= ndirect {
 		return 0, fmt.Errorf("can't read indirect block")
@@ -738,6 +744,14 @@ func (ip *inode) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 
 	return n, err
+}
+
+func major(dev uint64) uint64 {
+	return dev >> 32
+}
+
+func minor(dev uint64) uint64 {
+	return dev & 0xffffffff
 }
 
 func main() {
