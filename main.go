@@ -413,7 +413,6 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 }
 
 type dirEntry struct {
-	fsys  *FS
 	inode *inode
 
 	ino uint32
@@ -451,7 +450,6 @@ func (fsys *FS) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
 	}
 
 	dirent := parseDirEntry(buf)
-	dirent.fsys = fsys
 
 	// NeXTSTEP's UFS uses the old directory entry format, which doesn't
 	// include file type. Because fs.DirEntry has a Type() method, we have
