@@ -1175,7 +1175,7 @@ func (d *dirEntry) IsDir() bool {
 }
 
 func (d *dirEntry) Type() fs.FileMode {
-	return d.mode
+	return d.mode.Type()
 }
 
 func (d *dirEntry) Mode() fs.FileMode {
