@@ -281,6 +281,7 @@ type superblock struct {
 	ngroup    uint32
 	blocksize uint32
 	fragsize  uint32
+	fpb       uint32 // fragments per block
 
 	ipb uint32 // inodes per block
 
@@ -310,6 +311,7 @@ func parseSuperblock(buf []byte) (*superblock, error) {
 	s.ngroup = binary.BigEndian.Uint32(buf[44:48])
 	s.blocksize = binary.BigEndian.Uint32(buf[48:52])
 	s.fragsize = binary.BigEndian.Uint32(buf[52:56])
+	s.fpb = binary.BigEndian.Uint32(buf[56:60])
 
 	s.ipb = binary.BigEndian.Uint32(buf[120:124])
 
@@ -376,9 +378,11 @@ func (fsys *FS) readInode(ino uint32, name string) (*inode, error) {
 	}
 
 	group := ino / fsys.sb.ipg
-	block := fsys.sb.iblockno(group) + ino/fsys.sb.ipb
+	first := group * fsys.sb.ipg
+	ipf := fsys.sb.ipb / fsys.sb.fpb
+	frag := fsys.sb.iblockno(group) + (ino-first)/ipf
 
-	offset := int64(block)*int64(fsys.sb.fragsize) + int64(ino%fsys.sb.ipb)*int64(inodeSize)
+	offset := int64(frag)*int64(fsys.sb.fragsize) + int64(ino%ipf)*int64(inodeSize)
 
 	buf, err := readBytes(fsys.r, offset, inodeSize)
 	if err != nil {
@@ -695,10 +699,6 @@ func parseInode(buf []byte, name string, fsys *FS) *inode {
 	return &inode
 }
 
-func (ip *inode) IsDir() bool {
-	return true
-}
-
 func (ip *inode) Size() int64 {
 	return int64(ip.size)
 }
@@ -750,6 +750,10 @@ func (ip *inode) Mode() fs.FileMode {
 	}
 
 	return mode
+}
+
+func (ip *inode) IsDir() bool {
+	return ip.Mode().IsDir()
 }
 
 func (ip *inode) Name() string {
