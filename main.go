@@ -563,18 +563,16 @@ func (f *file) Read(p []byte) (int, error) {
 		return 0, fmt.Errorf("can't call Read on a directory")
 	}
 
-	return 0, fmt.Errorf("not implemented")
+	if len(p) == 0 {
+		return 0, nil
+	} else if f.offset >= f.inode.Size() {
+		return 0, io.EOF
+	}
 
-	// if len(p) == 0 {
-	// 	return 0, nil
-	// } else if f.offset >= f.inode.size {
-	// 	return 0, io.EOF
-	// }
+	n, err := f.inode.ReadAt(p, f.offset)
+	f.offset += int64(n)
 
-	// n, err := f.readAt(p, f.offset)
-	// f.offset += int64(n)
-
-	// return n, err
+	return n, err
 }
 
 func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
