@@ -870,23 +870,14 @@ func (ip *inode) ReadAt(p []byte, off int64) (n int, err error) {
 
 	blocksize := int64(ip.fsys.sb.blocksize)
 	fragsize := int64(ip.fsys.sb.fragsize)
-	nblocks := ceil(ip.Size(), blocksize) / blocksize
 
 	for n < len(p) {
-		blockno := int64(off / blocksize)
-
-		addr, err := ip.bmap(uint32(blockno))
+		addr, err := ip.bmap(uint32(off / blocksize))
 		if err != nil {
 			return n, err
 		}
 
-		var toRead int
-		// we're reading fragments
-		if blockno == nblocks-1 {
-			toRead = len(p) - n
-		} else {
-			toRead = min(int(blocksize), int(len(p)-n))
-		}
+		toRead := min(int(blocksize), len(p)-n)
 
 		m, err := ip.fsys.r.ReadAt(p[n:n+toRead], int64(addr)*fragsize+(off%blocksize))
 		n += m
