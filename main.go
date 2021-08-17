@@ -389,7 +389,7 @@ func (fsys *FS) readInode(ino uint32, name string) (*inode, error) {
 		return nil, fmt.Errorf("can't read inode: %w", err)
 	}
 
-	inode := parseInode(buf, name, fsys)
+	inode := parseInode(buf, name, ino, fsys)
 
 	return inode, nil
 }
@@ -630,6 +630,7 @@ const (
 
 type inode struct {
 	name string
+	ino  uint32
 	fsys *FS
 
 	mode      uint16
@@ -652,10 +653,11 @@ type inode struct {
 	gid        uint32
 }
 
-func parseInode(buf []byte, name string, fsys *FS) *inode {
+func parseInode(buf []byte, name string, ino uint32, fsys *FS) *inode {
 	var inode inode
 
 	inode.name = name
+	inode.ino = ino
 	inode.fsys = fsys
 
 	inode.mode = binary.BigEndian.Uint16(buf[0:2])
@@ -671,19 +673,11 @@ func parseInode(buf []byte, name string, fsys *FS) *inode {
 	for i := 0; i < ndirect; i++ {
 		block := binary.BigEndian.Uint32(buf[40+i*4 : 44+i*4])
 
-		if block == 0 {
-			break
-		}
-
 		inode.dblocks = append(inode.dblocks, block)
 	}
 
 	for i := 0; i < nindirect; i++ {
 		block := binary.BigEndian.Uint32(buf[88+i*4 : 92+i*4])
-
-		if block == 0 {
-			break
-		}
 
 		inode.iblocks = append(inode.iblocks, block)
 	}
@@ -762,12 +756,98 @@ func (ip *inode) Sys() interface{} {
 	return nil
 }
 
-func (ip *inode) blockno(idx int) (uint32, error) {
-	if idx >= ndirect {
-		return 0, fmt.Errorf("can't read indirect block")
+func pow(x, y int64) int64 {
+	res := int64(1)
+
+	for y > 0 {
+		res *= x
+		y -= 1
 	}
 
-	return ip.dblocks[idx], nil
+	return res
+}
+
+func (ip *inode) indirectBlockno(idx int64) (uint32, error) {
+	fragsize := int64(ip.fsys.sb.fragsize)
+
+	nindirect := int64(ip.fsys.sb.blocksize) / 4 // indirect
+
+	idx -= ndirect
+
+	if idx < 0 || idx >= pow(nindirect, 3) {
+		return 0, fmt.Errorf("inode %d: indirect block index %d out of range", ip.ino, idx)
+	}
+
+	var level int
+	if idx < nindirect {
+		level = 0
+	} else if idx < pow(nindirect, 2) {
+		level = 1
+		idx -= nindirect
+	} else {
+		level = 2
+		idx -= pow(nindirect, 2)
+	}
+
+	addr := ip.iblocks[level]
+
+	for level >= 0 {
+		// If an indirect block address is 0, is this an error, or does
+		// this indicate that pow(nindirect, level) blocks are all sparse?
+		//
+		// For now, we assume it marks all the blocks as sparse.
+		if addr == 0 {
+			return 0, nil
+		}
+
+		offset := int64(addr)*fragsize + int64(idx)/pow(nindirect, int64(level))*4
+
+		buf, err := readBytes(ip.fsys.r, offset, 4)
+		if err != nil {
+			return 0, fmt.Errorf("inode %d: read indirect block failed: %v", ip.ino, err)
+		}
+
+		addr = binary.BigEndian.Uint32(buf)
+		level -= 1
+	}
+
+	return addr, nil
+}
+
+func (ip *inode) bmap(idx int64) (uint32, error) {
+	if idx < ndirect {
+		return ip.dblocks[idx], nil
+	} else {
+		return ip.indirectBlockno(idx)
+	}
+}
+
+func (ip *inode) printBlocks() error {
+	blocksize := int64(ip.fsys.sb.blocksize)
+	fragsize := int64(ip.fsys.sb.fragsize)
+	fpb := int(ip.fsys.sb.fpb)
+
+	for i := int64(0); i < ip.Size(); i += blocksize {
+		blockOffset := i / blocksize
+
+		addr, err := ip.bmap(blockOffset)
+		if err != nil {
+			return err
+		}
+
+		fragsLeft := ceil(ip.Size()-i, fragsize) / fragsize
+		nfrag := min(int(fragsLeft), fpb)
+
+		for j := 0; j < nfrag; j++ {
+			fmt.Printf("%d ", int(addr)+j)
+		}
+
+		if blockOffset%2 == 1 {
+			fmt.Println()
+		}
+	}
+
+	return nil
 }
 
 func min(a, b int) int {
@@ -776,6 +856,10 @@ func min(a, b int) int {
 	} else {
 		return b
 	}
+}
+
+func ceil(n, m int64) int64 {
+	return m * ((n + (m - 1)) / m)
 }
 
 func (ip *inode) ReadAt(p []byte, off int64) (n int, err error) {
@@ -790,12 +874,12 @@ func (ip *inode) ReadAt(p []byte, off int64) (n int, err error) {
 
 	blocksize := int64(ip.fsys.sb.blocksize)
 	fragsize := int64(ip.fsys.sb.fragsize)
-	nblocks := int(ip.Size()/blocksize) + 1
+	nblocks := ceil(ip.Size(), blocksize) / blocksize
 
 	for n < len(p) {
-		idx := int(off / blocksize)
+		idx := off / blocksize
 
-		addr, err := ip.blockno(idx)
+		addr, err := ip.bmap(idx)
 		if err != nil {
 			return n, err
 		}
@@ -881,48 +965,71 @@ func main() {
 	// 	log.Fatal(err)
 	// }
 
-	err = fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		info, err := dirent.Info()
-		if err != nil {
-			return err
-		}
-
-		fmt.Printf("%s\t", info.Mode().String())
-
-		if dirent, ok := dirent.(DeviceDirEntry); info.Mode()&fs.ModeDevice != 0 && ok {
-			dev, err := dirent.Device()
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf("%d, %d\t", major(dev), minor(dev))
-		} else {
-			fmt.Printf("%d\t", info.Size())
-		}
-
-		if path == "." {
-			fmt.Print("/")
-		} else {
-			fmt.Printf("/%s", path)
-		}
-
-		if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
-			target, err := dirent.Readlink()
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf(" -> %s", target)
-		}
-		fmt.Println()
-
-		return nil
-	})
+	bytes, err := fs.ReadFile(fsys, "NextCD/Packages/WebsterIllustrations.pkg/WebsterIllustrations.tar.Z")
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	err = os.WriteFile("./WebsterIllustrations.tar.Z", bytes, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// info, err := f.Stat()
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// if inode, ok := info.(*inode); ok {
+	// 	fmt.Println(inode.Name(), inode.ino)
+	// 	for i, addr := range(inode.dblocks) {
+
+	// } else {
+	// 	log.Fatal("not an inode")
+	// }
+
+	// err = fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
+	// 	if err != nil {
+	// 		return err
+	// 	}
+
+	// 	info, err := dirent.Info()
+	// 	if err != nil {
+	// 		return err
+	// 	}
+
+	// 	fmt.Printf("%s\t", info.Mode().String())
+
+	// 	if dirent, ok := dirent.(DeviceDirEntry); info.Mode()&fs.ModeDevice != 0 && ok {
+	// 		dev, err := dirent.Device()
+	// 		if err != nil {
+	// 			return err
+	// 		}
+
+	// 		fmt.Printf("%d, %d\t", major(dev), minor(dev))
+	// 	} else {
+	// 		fmt.Printf("%d\t", info.Size())
+	// 	}
+
+	// 	if path == "." {
+	// 		fmt.Print("/")
+	// 	} else {
+	// 		fmt.Printf("/%s", path)
+	// 	}
+
+	// 	if dirent, ok := dirent.(ReadlinkDirEntry); info.Mode()&fs.ModeSymlink != 0 && ok {
+	// 		target, err := dirent.Readlink()
+	// 		if err != nil {
+	// 			return err
+	// 		}
+
+	// 		fmt.Printf(" -> %s", target)
+	// 	}
+	// 	fmt.Println()
+
+	// 	return nil
+	// })
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
 }
