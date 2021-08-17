@@ -624,7 +624,6 @@ func (f *file) Close() error {
 const (
 	inodeSize = 128
 	ndirect   = 12
-	nindirect = 3
 	rootInode = 2
 )
 
@@ -643,8 +642,10 @@ type inode struct {
 	ctime     uint32 // metadata change time
 	ctimensec uint32
 
-	dblocks []uint32
-	iblocks []uint32
+	// 12 direct block pointers followed by indirect,
+	// double indirect, and triple indirect block
+	// pointers.
+	addrs [ndirect + 3]uint32
 
 	flags      uint32
 	blocksHeld uint32
@@ -670,16 +671,9 @@ func parseInode(buf []byte, name string, ino uint32, fsys *FS) *inode {
 	inode.ctime = binary.BigEndian.Uint32(buf[32:36])
 	inode.ctimensec = binary.BigEndian.Uint32(buf[36:40])
 
-	for i := 0; i < ndirect; i++ {
-		block := binary.BigEndian.Uint32(buf[40+i*4 : 44+i*4])
-
-		inode.dblocks = append(inode.dblocks, block)
-	}
-
-	for i := 0; i < nindirect; i++ {
-		block := binary.BigEndian.Uint32(buf[88+i*4 : 92+i*4])
-
-		inode.iblocks = append(inode.iblocks, block)
+	for i := 0; i < ndirect+3; i++ {
+		addr := binary.BigEndian.Uint32(buf[40+i*4 : 44+i*4])
+		inode.addrs[i] = addr
 	}
 
 	inode.flags = binary.BigEndian.Uint32(buf[100:104])
@@ -756,8 +750,8 @@ func (ip *inode) Sys() interface{} {
 	return nil
 }
 
-func pow(x, y int64) int64 {
-	res := int64(1)
+func pow(x, y uint32) uint32 {
+	res := uint32(1)
 
 	for y > 0 {
 		res *= x
@@ -767,40 +761,51 @@ func pow(x, y int64) int64 {
 	return res
 }
 
-func (ip *inode) indirectBlockno(idx int64) (uint32, error) {
-	fragsize := int64(ip.fsys.sb.fragsize)
+// Maps a logical block number in a file to a physical
+// block number on disk. Logical block numbers are
+// consecutive (0, 1, 2, 3, etc.) while physical block
+// numbers are numbered by their associated fragment
+// (0, 4, 8, 12, etc. for 4 fragments per block).
+func (ip *inode) bmap(idx uint32) (uint32, error) {
+	apb := ip.fsys.sb.blocksize / 4 // addrs per block
 
-	nindirect := int64(ip.fsys.sb.blocksize) / 4 // indirect
+	nindirect := pow(apb, 1) + pow(apb, 2) + pow(apb, 3)
 
-	idx -= ndirect
-
-	if idx < 0 || idx >= pow(nindirect, 3) {
+	if idx < 0 || idx >= ndirect+nindirect {
 		return 0, fmt.Errorf("inode %d: indirect block index %d out of range", ip.ino, idx)
 	}
 
-	var level int
-	if idx < nindirect {
-		level = 0
-	} else if idx < pow(nindirect, 2) {
-		level = 1
-		idx -= nindirect
-	} else {
-		level = 2
-		idx -= pow(nindirect, 2)
+	if idx < ndirect {
+		return ip.addrs[idx], nil
 	}
 
-	addr := ip.iblocks[level]
+	idx -= ndirect
+
+	fragsize := int64(ip.fsys.sb.fragsize)
+
+	var level int
+	if idx < apb {
+		level = 0
+	} else if idx < pow(apb, 2) {
+		level = 1
+		idx -= apb
+	} else {
+		level = 2
+		idx -= pow(apb, 2)
+	}
+
+	addr := ip.addrs[ndirect+level]
 
 	for level >= 0 {
 		// If an indirect block address is 0, is this an error, or does
-		// this indicate that pow(nindirect, level) blocks are all sparse?
+		// this indicate that pow(addrsPerBlock, level) blocks are all sparse?
 		//
 		// For now, we assume it marks all the blocks as sparse.
 		if addr == 0 {
 			return 0, nil
 		}
 
-		offset := int64(addr)*fragsize + int64(idx)/pow(nindirect, int64(level))*4
+		offset := int64(addr)*fragsize + int64(idx/pow(apb, uint32(level)))*4
 
 		buf, err := readBytes(ip.fsys.r, offset, 4)
 		if err != nil {
@@ -814,35 +819,26 @@ func (ip *inode) indirectBlockno(idx int64) (uint32, error) {
 	return addr, nil
 }
 
-func (ip *inode) bmap(idx int64) (uint32, error) {
-	if idx < ndirect {
-		return ip.dblocks[idx], nil
-	} else {
-		return ip.indirectBlockno(idx)
-	}
-}
-
 func (ip *inode) printBlocks() error {
 	blocksize := int64(ip.fsys.sb.blocksize)
 	fragsize := int64(ip.fsys.sb.fragsize)
 	fpb := int(ip.fsys.sb.fpb)
 
-	for i := int64(0); i < ip.Size(); i += blocksize {
-		blockOffset := i / blocksize
+	for offset := int64(0); offset < ip.Size(); offset += blocksize {
 
-		addr, err := ip.bmap(blockOffset)
+		addr, err := ip.bmap(uint32(offset / blocksize))
 		if err != nil {
 			return err
 		}
 
-		fragsLeft := ceil(ip.Size()-i, fragsize) / fragsize
+		fragsLeft := ceil(ip.Size()-offset, fragsize) / fragsize
 		nfrag := min(int(fragsLeft), fpb)
 
 		for j := 0; j < nfrag; j++ {
 			fmt.Printf("%d ", int(addr)+j)
 		}
 
-		if blockOffset%2 == 1 {
+		if (offset/blocksize)%2 == 1 {
 			fmt.Println()
 		}
 	}
@@ -877,16 +873,16 @@ func (ip *inode) ReadAt(p []byte, off int64) (n int, err error) {
 	nblocks := ceil(ip.Size(), blocksize) / blocksize
 
 	for n < len(p) {
-		idx := off / blocksize
+		blockno := int64(off / blocksize)
 
-		addr, err := ip.bmap(idx)
+		addr, err := ip.bmap(uint32(blockno))
 		if err != nil {
 			return n, err
 		}
 
 		var toRead int
 		// we're reading fragments
-		if idx == nblocks-1 {
+		if blockno == nblocks-1 {
 			toRead = len(p) - n
 		} else {
 			toRead = min(int(blocksize), int(len(p)-n))
