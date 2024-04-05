@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf16"
+
+	"github.com/davidbalbert/iso2next/fsutil"
 )
 
 const kb = 1024
@@ -841,12 +843,24 @@ func (d *dirEntry) Readlink() (string, error) {
 	return d.symlink, nil
 }
 
-func (d *dirEntry) Device() (uint64, error) {
+func (d *dirEntry) GetDevice() (fsutil.Device, error) {
 	if d.mode&fs.ModeDevice == 0 {
-		return 0, fmt.Errorf("not a device: %s", d.name)
+		return nil, fmt.Errorf("not a device: %s", d.name)
 	}
 
-	return d.dev, nil
+	return &device{d.dev}, nil
+}
+
+type device struct {
+	dev uint64
+}
+
+func (d *device) Major() uint64 {
+	return d.dev >> 32
+}
+
+func (d *device) Minor() uint64 {
+	return d.dev & 0xffffffff
 }
 
 func location(tzSeconds int) *time.Location {
