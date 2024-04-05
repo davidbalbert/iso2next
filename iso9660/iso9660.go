@@ -1213,28 +1213,28 @@ func (d *dirEntry) Info() (fs.FileInfo, error) {
 }
 
 type file struct {
-	fsys *FS
-	*dirEntry
+	fsys   *FS
+	dirent *dirEntry
 	offset int64
 }
 
 func (f *file) Stat() (fs.FileInfo, error) {
-	return f.dirEntry, nil
+	return f.dirent, nil
 }
 
 // returns first byte of the file in the file system
 func (f *file) start() int64 {
-	return int64(f.dirEntry.lba) * f.fsys.logicalBlockSize
+	return int64(f.dirent.lba) * f.fsys.logicalBlockSize
 }
 
 func (f *file) Read(p []byte) (int, error) {
-	if f.dirEntry.IsDir() {
+	if f.dirent.IsDir() {
 		return 0, fmt.Errorf("can't call Read on a directory")
 	}
 
 	if len(p) == 0 {
 		return 0, nil
-	} else if f.offset >= f.dirEntry.Size() {
+	} else if f.offset >= f.dirent.Size() {
 		return 0, io.EOF
 	}
 
@@ -1263,7 +1263,7 @@ func (f *file) peek() (byte, error) {
 }
 
 func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
-	if !f.dirEntry.IsDir() {
+	if !f.dirent.IsDir() {
 		return nil, fmt.Errorf("can't call ReadDir on a file")
 	}
 
@@ -1286,7 +1286,7 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			f.offset = ceil(f.offset, sectSize)
 		}
 
-		if f.offset >= f.dirEntry.Size() {
+		if f.offset >= f.dirent.Size() {
 			break
 		}
 
@@ -1468,6 +1468,10 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	dirent, err := fsys.walk(name)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	}
+
+	if dirent.Type() == fs.ModeSymlink {
+		return fsys.Open(dirent.symlink)
 	}
 
 	return &file{fsys, dirent, 0}, nil
