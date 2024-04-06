@@ -835,14 +835,6 @@ type dirEntry struct {
 	relocated bool
 }
 
-func (d *dirEntry) Readlink() (string, error) {
-	if d.mode&fs.ModeSymlink == 0 {
-		return "", fmt.Errorf("not a symlink: %s", d.name)
-	}
-
-	return d.symlink, nil
-}
-
 func (d *dirEntry) GetDevice() (fsutil.Device, error) {
 	if d.mode&fs.ModeDevice == 0 {
 		return nil, fmt.Errorf("not a device: %s", d.name)
@@ -1483,4 +1475,34 @@ func (fsys *FS) Close() error {
 	}
 
 	return nil
+}
+
+func (fsys *FS) ReadLink(name string) (string, error) {
+	if !fs.ValidPath(name) {
+		return "", &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+
+	dirent, err := fsys.walk(name)
+	if err != nil {
+		return "", &fs.PathError{Op: "open", Path: name, Err: err}
+	}
+
+	if dirent.Type() != fs.ModeSymlink {
+		return "", fmt.Errorf("%s is not a symlink", name)
+	}
+
+	return dirent.symlink, nil
+}
+
+func (fsys *FS) Lstat(name string) (fs.FileInfo, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrInvalid}
+	}
+
+	dirent, err := fsys.walk(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: err}
+	}
+
+	return dirent, nil
 }
