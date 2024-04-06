@@ -17,10 +17,9 @@ func usage() {
 
 	fmt.Printf("Usage: %s <command> [options] [args]\n", progname)
 	fmt.Printf("Commands:\n")
-	fmt.Printf("  %s ls [-alfr] image_file [path]\n", progname)
-	fmt.Printf("  %s ls [-h]\n", progname)
+	fmt.Printf("  %s cat image_file path\n", progname)
 	fmt.Printf("  %s cp image_file source_path destination_path\n", progname)
-	fmt.Printf("  %s cp [-h]\n", progname)
+	fmt.Printf("  %s ls [-alfrF] image_file path\n", progname)
 }
 
 func main() {
@@ -32,16 +31,81 @@ func main() {
 	}
 
 	switch os.Args[1] {
-	case "ls":
-		ls()
+	case "cat":
+		cat()
 	case "cp":
 		cp()
+	case "ls":
+		ls()
 	case "help", "-h", "-help", "--help":
 		usage()
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		usage()
 		os.Exit(1)
+	}
+}
+
+func cat() {
+	if len(os.Args) != 4 {
+		fmt.Printf("Usage: %s cat image_file path\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	image := os.Args[2]
+	path := os.Args[3]
+
+	path = strings.TrimPrefix(path, "/")
+	if path == "" {
+		path = "."
+	}
+
+	fsys, err := iso9660.Open(image)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fsys.Close()
+
+	bytes, err := fs.ReadFile(fsys, path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Print(string(bytes))
+	if len(bytes) > 0 && bytes[len(bytes)-1] != '\n' {
+		fmt.Println()
+	}
+}
+
+func cp() {
+	if len(os.Args) != 5 {
+		fmt.Printf("Usage: %s cp image_file source_path destination_path\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	image := os.Args[2]
+	srcPath := os.Args[3]
+	dstPath := os.Args[4]
+
+	srcPath = strings.TrimPrefix(srcPath, "/")
+	if srcPath == "" {
+		srcPath = "."
+	}
+
+	fsys, err := iso9660.Open(image)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fsys.Close()
+
+	bytes, err := fs.ReadFile(fsys, srcPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = os.WriteFile(dstPath, bytes, 0644)
+	if err != nil {
+		log.Fatal(err)
 	}
 }
 
@@ -165,10 +229,6 @@ func ls() {
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-
-func cp() {
-
 }
 
 func formatMetadata(dirent fs.DirEntry) (string, error) {
