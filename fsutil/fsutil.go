@@ -2,9 +2,9 @@ package fsutil
 
 import "io/fs"
 
-type DeviceDirEntry interface {
-	fs.DirEntry
-	GetDevice() (Device, error)
+type DeviceFileInfo interface {
+	fs.FileInfo
+	Device() (Device, error)
 }
 
 type Device interface {

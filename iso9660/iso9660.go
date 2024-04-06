@@ -835,7 +835,7 @@ type dirEntry struct {
 	relocated bool
 }
 
-func (d *dirEntry) GetDevice() (fsutil.Device, error) {
+func (d *dirEntry) Device() (fsutil.Device, error) {
 	if d.mode&fs.ModeDevice == 0 {
 		return nil, fmt.Errorf("not a device: %s", d.name)
 	}
@@ -1476,6 +1476,8 @@ func (fsys *FS) Close() error {
 
 	return nil
 }
+
+// SymlinkFS
 
 func (fsys *FS) ReadLink(name string) (string, error) {
 	if !fs.ValidPath(name) {
