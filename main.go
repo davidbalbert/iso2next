@@ -94,11 +94,42 @@ func ls() {
 			return err
 		}
 
+		if path == rootPath && dirent.IsDir() && !rflag {
+			return nil
+		}
+
+		// At this point, if path is ".", rflag must be true, because the only way to get
+		// path == "." is for rootPath == "." as well.
 		if path == "." {
-			if rflag {
-				fmt.Println("/")
+			if lflag {
+				meta, err := formatMetadata(dirent)
+				if err != nil {
+					return err
+				}
+
+				fmt.Print(meta)
+			}
+			fmt.Println("/")
+			return nil
+		}
+
+		skipPrint := path != rootPath && !aflag && strings.HasPrefix(dirent.Name(), ".")
+		skipChildren := dirent.IsDir() && (!rflag || (!aflag && strings.HasPrefix(dirent.Name(), ".")))
+
+		if skipPrint {
+			if skipChildren {
+				return fs.SkipDir
 			}
 			return nil
+		}
+
+		if lflag {
+			meta, err := formatMetadata(dirent)
+			if err != nil {
+				return err
+			}
+
+			fmt.Print(meta)
 		}
 
 		fname := dirent.Name()
@@ -106,37 +137,29 @@ func ls() {
 			fname = "."
 		}
 
-		if aflag || !strings.HasPrefix(fname, ".") {
-			suffix := ""
-			if Fflag {
-				switch dirent.Type() {
-				case fs.ModeDir:
-					suffix = "/"
-				case fs.ModeSymlink:
-					suffix = "@"
-				case fs.ModeSocket:
-					suffix = "="
-				case fs.ModeNamedPipe:
-					suffix = "|"
-				}
-			}
-
-			if fflag {
-				fmt.Println("/" + path + suffix)
-			} else {
-				fmt.Println(fname + suffix)
+		suffix := ""
+		if Fflag {
+			switch dirent.Type() {
+			case fs.ModeDir:
+				suffix = "/"
+			case fs.ModeSymlink:
+				suffix = "@"
+			case fs.ModeSocket:
+				suffix = "="
+			case fs.ModeNamedPipe:
+				suffix = "|"
 			}
 		}
 
-		// never skip the children of the file/directory we're listing
-		if path == rootPath {
-			return nil
+		if fflag {
+			fmt.Println("/" + path + suffix)
+		} else {
+			fmt.Println(fname + suffix)
 		}
 
-		if dirent.IsDir() && (!rflag || (!aflag && strings.HasPrefix(fname, "."))) {
+		if skipChildren {
 			return fs.SkipDir
 		}
-
 		return nil
 	})
 	if err != nil {
