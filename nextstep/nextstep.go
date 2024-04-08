@@ -325,7 +325,7 @@ func (sb *superblock) dblockno(group uint32) uint32 {
 	return sb.groupBase(group) + sb.dblkno
 }
 
-type FS struct {
+type nextfs struct {
 	r  io.ReaderAt
 	sb *superblock
 }
@@ -341,13 +341,13 @@ func NewFS(r io.ReaderAt) (fs.FS, error) {
 		return nil, fmt.Errorf("error parsing superblock: %w", err)
 	}
 
-	return &FS{
+	return &nextfs{
 		r:  r,
 		sb: sb,
 	}, nil
 }
 
-func (fsys *FS) readInode(ino uint32, name string) (*inode, error) {
+func (fsys *nextfs) readInode(ino uint32, name string) (*inode, error) {
 	if ino > fsys.sb.ipg*fsys.sb.ngroup {
 		return nil, fmt.Errorf("invalid inode number %d", ino)
 	}
@@ -369,7 +369,7 @@ func (fsys *FS) readInode(ino uint32, name string) (*inode, error) {
 	return inode, nil
 }
 
-func (fsys *FS) walk(name string) (*inode, error) {
+func (fsys *nextfs) walk(name string) (*inode, error) {
 	pathComponents := strings.Split(name, "/")
 
 	if pathComponents[0] == "." {
@@ -413,7 +413,7 @@ func (fsys *FS) walk(name string) (*inode, error) {
 	return inode, nil
 }
 
-func (fsys *FS) Open(name string) (fs.File, error) {
+func (fsys *nextfs) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
@@ -450,7 +450,7 @@ type dirEntry struct {
 	name string
 }
 
-func (fsys *FS) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
+func (fsys *nextfs) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
 	buf, err := readBytes(r, offset+6, 2)
 	if err != nil {
 		return nil, fmt.Errorf("can't read directory entry name length: %w", err)
@@ -520,12 +520,12 @@ func (d *dirEntry) Type() fs.FileMode {
 }
 
 type file struct {
-	fsys *FS
+	fsys *nextfs
 	*inode
 	offset int64
 }
 
-func newFile(fsys *FS, ip *inode) *file {
+func newFile(fsys *nextfs, ip *inode) *file {
 	return &file{
 		fsys:   fsys,
 		inode:  ip,
@@ -605,7 +605,7 @@ const (
 type inode struct {
 	name string
 	ino  uint32
-	fsys *FS
+	fsys *nextfs
 
 	mode      uint16
 	nlink     uint16
@@ -629,7 +629,7 @@ type inode struct {
 	gid        uint32
 }
 
-func parseInode(buf []byte, name string, ino uint32, fsys *FS) *inode {
+func parseInode(buf []byte, name string, ino uint32, fsys *nextfs) *inode {
 	var inode inode
 
 	inode.name = name

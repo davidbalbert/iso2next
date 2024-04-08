@@ -1036,7 +1036,7 @@ func readDirEntry(r io.ReaderAt, offset int64, joliet bool) (*dirEntry, error) {
 	return parseDirEntry(buf, joliet)
 }
 
-func (fsys *FS) readDirEntry(offset int64) (*dirEntry, int, error) {
+func (fsys *isofs) readDirEntry(offset int64) (*dirEntry, int, error) {
 	dirent, err := readDirEntry(fsys.r, offset, fsys.joliet)
 	if err != nil {
 		return nil, 0, err
@@ -1067,7 +1067,7 @@ func (fsys *FS) readDirEntry(offset int64) (*dirEntry, int, error) {
 	return child, int(dirent.len), nil
 }
 
-func (d *dirEntry) readRockRidge(fsys *FS) error {
+func (d *dirEntry) readRockRidge(fsys *isofs) error {
 	var toRead *dirEntry
 
 	// The "." entry in the root directory holds the root's system use field.
@@ -1204,7 +1204,7 @@ func (d *dirEntry) Info() (fs.FileInfo, error) {
 }
 
 type file struct {
-	fsys   *FS
+	fsys   *isofs
 	dirent *dirEntry
 	offset int64
 }
@@ -1316,7 +1316,7 @@ const (
 	OptNoRockRidge
 )
 
-type FS struct {
+type isofs struct {
 	r                io.ReaderAt
 	root             *dirEntry
 	logicalBlockSize int64
@@ -1362,9 +1362,9 @@ func NewFS(r io.ReaderAt, options ...Option) (fs.FS, error) {
 		return nil, fmt.Errorf("error detecting SUSP and Rock Ridge: %v", err)
 	}
 
-	var fsys *FS
+	var fsys *isofs
 	if rockRidge && !noRockRidge {
-		fsys = &FS{
+		fsys = &isofs{
 			r:                r,
 			root:             primary.root,
 			logicalBlockSize: int64(primary.logicalBlockSize),
@@ -1377,7 +1377,7 @@ func NewFS(r io.ReaderAt, options ...Option) (fs.FS, error) {
 			return nil, err
 		}
 	} else if supplementary != nil && !noJoliet {
-		fsys = &FS{
+		fsys = &isofs{
 			r:                r,
 			root:             supplementary.root,
 			logicalBlockSize: int64(supplementary.logicalBlockSize),
@@ -1386,7 +1386,7 @@ func NewFS(r io.ReaderAt, options ...Option) (fs.FS, error) {
 			joliet:           true,
 		}
 	} else {
-		fsys = &FS{
+		fsys = &isofs{
 			r:                r,
 			root:             primary.root,
 			logicalBlockSize: int64(primary.logicalBlockSize),
@@ -1408,7 +1408,7 @@ func contains(a []string, s string) bool {
 	return false
 }
 
-func (fsys *FS) walk(name string) (*dirEntry, error) {
+func (fsys *isofs) walk(name string) (*dirEntry, error) {
 	pathComponents := strings.Split(name, "/")
 
 	if pathComponents[0] == "." {
@@ -1445,7 +1445,7 @@ func (fsys *FS) walk(name string) (*dirEntry, error) {
 	return dirent, nil
 }
 
-func (fsys *FS) Open(name string) (fs.File, error) {
+func (fsys *isofs) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
@@ -1464,7 +1464,7 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 
 // SymlinkFS
 
-func (fsys *FS) ReadLink(name string) (string, error) {
+func (fsys *isofs) ReadLink(name string) (string, error) {
 	if !fs.ValidPath(name) {
 		return "", &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
@@ -1481,7 +1481,7 @@ func (fsys *FS) ReadLink(name string) (string, error) {
 	return dirent.symlink, nil
 }
 
-func (fsys *FS) Lstat(name string) (fs.FileInfo, error) {
+func (fsys *isofs) Lstat(name string) (fs.FileInfo, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrInvalid}
 	}
