@@ -1230,9 +1230,12 @@ func (f *file) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 
+	if f.offset+int64(len(p)) > f.dirent.Size() {
+		p = p[:f.dirent.Size()-f.offset]
+	}
+
 	start := f.start()
-	l := max(f.dirent.Size()-f.offset, 0)
-	n, err := f.fsys.r.ReadAt(p[:l], start+f.offset)
+	n, err := f.fsys.r.ReadAt(p, start+f.offset)
 	f.offset += int64(n)
 	return n, err
 }
