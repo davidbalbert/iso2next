@@ -1466,12 +1466,12 @@ func (fsys *isofs) Open(name string) (fs.File, error) {
 
 func (fsys *isofs) ReadLink(name string) (string, error) {
 	if !fs.ValidPath(name) {
-		return "", &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
 	}
 
 	dirent, err := fsys.walk(name)
 	if err != nil {
-		return "", &fs.PathError{Op: "open", Path: name, Err: err}
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: err}
 	}
 
 	if dirent.Type() != fs.ModeSymlink {
