@@ -1231,8 +1231,8 @@ func (f *file) Read(p []byte) (int, error) {
 	}
 
 	start := f.start()
-
-	n, err := f.fsys.r.ReadAt(p, start+f.offset)
+	l := max(f.dirent.Size()-f.offset, 0)
+	n, err := f.fsys.r.ReadAt(p[:l], start+f.offset)
 	f.offset += int64(n)
 	return n, err
 }

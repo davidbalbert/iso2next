@@ -72,9 +72,6 @@ func cat() {
 	}
 
 	fmt.Print(string(bytes))
-	if len(bytes) > 0 && bytes[len(bytes)-1] != '\n' {
-		fmt.Println()
-	}
 }
 
 func cp() {
@@ -345,8 +342,8 @@ func formatMetadata(dirent fs.DirEntry) (string, error) {
 
 		fmt.Printf("%s\t", info.Mode().String())
 
-		if dirent, ok := dirent.(fsutil.DeviceDirEntry); ok && info.Mode()&fs.ModeDevice != 0 {
-			dev, err := dirent.GetDevice()
+		if info, ok := info.(fsutil.DeviceFileInfo); ok && dirent.Type() == fs.ModeDevice {
+			dev, err := info.Device()
 			if err != nil {
 				return err
 			}
@@ -362,8 +359,8 @@ func formatMetadata(dirent fs.DirEntry) (string, error) {
 			fmt.Printf("/%s", path)
 		}
 
-		if dirent, ok := dirent.(fsutil.ReadlinkDirEntry); ok && info.Mode()&fs.ModeSymlink != 0 {
-			target, err := dirent.Readlink()
+		if dirent.Type() == fs.ModeSymlink {
+			target, err := fsutil.ReadLink(fsys, path)
 			if err != nil {
 				return err
 			}
