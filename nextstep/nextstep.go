@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"strings"
 	"time"
 )
@@ -185,13 +184,8 @@ type Disk struct {
 	partitions []partition
 }
 
-func Open(name string) (*Disk, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-
-	label, err := readDiskLabel(f)
+func NewDisk(r io.ReaderAt) (*Disk, error) {
+	label, err := readDiskLabel(r)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +193,7 @@ func Open(name string) (*Disk, error) {
 	offset := partitionTableOffset
 	var partitions []partition
 	for i := 0; i < maxPartitions; i++ {
-		buf, err := readBytes(f, offset, partitionEntrySize)
+		buf, err := readBytes(r, offset, partitionEntrySize)
 		if err != nil {
 			return nil, fmt.Errorf("error reading partition table: %w", err)
 		}
@@ -220,7 +214,7 @@ func Open(name string) (*Disk, error) {
 	}
 
 	return &Disk{
-		r:          f,
+		r:          r,
 		label:      label,
 		partitions: partitions,
 	}, nil
@@ -244,14 +238,6 @@ func (d *Disk) GetPartition(i int) (*FS, error) {
 	start := (int64(p.offset) + int64(d.label.frontPorchSectors)) * int64(d.label.sectsize)
 
 	return NewFS(newOffsetReaderAt(d.r, start))
-}
-
-func (d *Disk) Close() error {
-	if c, ok := d.r.(io.Closer); ok {
-		return c.Close()
-	}
-
-	return nil
 }
 
 const (

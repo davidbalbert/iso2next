@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/davidbalbert/iso2next/fsutil"
 	"github.com/davidbalbert/iso2next/iso9660"
+	"github.com/davidbalbert/iso2next/nextstep"
 )
 
 func usage() {
@@ -46,6 +48,24 @@ func main() {
 	}
 }
 
+func openfs(r io.ReaderAt) (fs.FS, error) {
+	fsys, err := iso9660.NewFS(r)
+	if err == nil {
+		return fsys, nil
+	}
+
+	disk, err := nextstep.NewDisk(r)
+	if err != nil {
+		return nil, err
+	}
+
+	fsys, err = disk.GetPartition(0)
+	if err != nil {
+		return nil, err
+	}
+	return fsys, nil
+}
+
 func cat() {
 	if len(os.Args) != 4 {
 		fmt.Printf("Usage: %s cat image_file path\n", os.Args[0])
@@ -60,11 +80,16 @@ func cat() {
 		path = "."
 	}
 
-	fsys, err := iso9660.Open(image)
+	r, err := os.Open(image)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fsys.Close()
+	defer r.Close()
+
+	fsys, err := openfs(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	bytes, err := fs.ReadFile(fsys, path)
 	if err != nil {
@@ -89,11 +114,16 @@ func cp() {
 		srcPath = "."
 	}
 
-	fsys, err := iso9660.Open(image)
+	r, err := os.Open(image)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fsys.Close()
+	defer r.Close()
+
+	fsys, err := openfs(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	bytes, err := fs.ReadFile(fsys, srcPath)
 	if err != nil {
@@ -144,11 +174,16 @@ func ls() {
 		rootPath = "."
 	}
 
-	fsys, err := iso9660.Open(image)
+	r, err := os.Open(image)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fsys.Close()
+	defer r.Close()
+
+	fsys, err := openfs(r)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	err = fs.WalkDir(fsys, rootPath, func(path string, dirent fs.DirEntry, err error) error {
 		if err != nil {
@@ -251,127 +286,4 @@ func formatMetadata(dirent fs.DirEntry) (string, error) {
 	}
 
 	return sb.String(), nil
-}
-	if len(os.Args) != 2 {
-		log.Fatalf("Usage: %s <iso9660 image>\n", os.Args[0])
-	}
-
-	fname := os.Args[1]
-
-	// disk, err := Open(fname)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer disk.Close()
-
-	// fsys, err := disk.GetPartition(0)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	fsys, err := iso9660.Open(fname)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer fsys.Close()
-
-	// f, err := fsys.Open(".")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer f.Close()
-
-	// if f, ok := f.(fs.ReadDirFile); ok {
-	// 	dirents, err := f.ReadDir(0)
-	// 	if err != nil {
-	// 		log.Fatal(err)
-	// 	}
-
-	// 	for _, dirent := range dirents {
-	// 		log.Println(dirent)
-	// 	}
-	// } else {
-	// 	log.Fatal("not a directory")
-	// }
-
-	// fmt.Println(disk.label.frontPorchSectors, disk.label.sectsize, disk.partitions)
-
-	// r, err := mmap.Open(fname)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer r.Close()
-
-	// fsys, err := iso9660.NewFS(r)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// bytes, err := fs.ReadFile(fsys, "NextAdmin/BuildDisk.app/BuildingTile.tiff")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// err = os.WriteFile("./BuildingTile.tiff", bytes, 0644)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// info, err := f.Stat()
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// if inode, ok := info.(*inode); ok {
-	// 	fmt.Println(inode.Name(), inode.ino)
-	// 	for i, addr := range(inode.dblocks) {
-
-	// } else {
-	// 	log.Fatal("not an inode")
-	// }
-
-	err = fs.WalkDir(fsys, ".", func(path string, dirent fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		info, err := dirent.Info()
-		if err != nil {
-			return err
-		}
-
-		fmt.Printf("%s\t", info.Mode().String())
-
-		if info, ok := info.(fsutil.DeviceFileInfo); ok && dirent.Type() == fs.ModeDevice {
-			dev, err := info.Device()
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf("%d, %d\t", dev.Major(), dev.Minor())
-		} else {
-			fmt.Printf("%d\t", info.Size())
-		}
-
-		if path == "." {
-			fmt.Print("/")
-		} else {
-			fmt.Printf("/%s", path)
-		}
-
-		if dirent.Type() == fs.ModeSymlink {
-			target, err := fsutil.ReadLink(fsys, path)
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf(" -> %s", target)
-		}
-		fmt.Println()
-
-		return nil
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1326,16 +1325,7 @@ type FS struct {
 	joliet           bool
 }
 
-func Open(name string, options ...Option) (*FS, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-
-	return NewFS(f, options...)
-}
-
-func NewFS(r io.ReaderAt, options ...Option) (*FS, error) {
+func NewFS(r io.ReaderAt, options ...Option) (fs.FS, error) {
 	vds, err := readVolumeDescriptors(r)
 	if err != nil {
 		return nil, err
@@ -1470,14 +1460,6 @@ func (fsys *FS) Open(name string) (fs.File, error) {
 	}
 
 	return &file{fsys, dirent, 0}, nil
-}
-
-func (fsys *FS) Close() error {
-	if c, ok := fsys.r.(io.Closer); ok {
-		return c.Close()
-	}
-
-	return nil
 }
 
 // SymlinkFS
