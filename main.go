@@ -239,8 +239,8 @@ func formatMetadata(dirent fs.DirEntry) (string, error) {
 	sb.WriteString(info.Mode().String())
 	sb.WriteString("\t")
 
-	if info, ok := info.(fsutil.DeviceFileInfo); ok && dirent.Type() == fs.ModeDevice {
-		dev, err := info.Device()
+	if devinfo, ok := info.(fsutil.DeviceFileInfo); ok && dirent.Type() == fs.ModeDevice {
+		dev, err := devinfo.Device()
 		if err != nil {
 			return "", err
 		}
