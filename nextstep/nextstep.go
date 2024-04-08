@@ -224,7 +224,7 @@ func (d *Disk) NPart() int {
 	return len(d.partitions)
 }
 
-func (d *Disk) GetPartition(i int) (*FS, error) {
+func (d *Disk) GetPartition(i int) (fs.FS, error) {
 	if i < 0 || i >= len(d.partitions) {
 		return nil, fmt.Errorf("invalid partition index %d", i)
 	}
@@ -330,7 +330,7 @@ type FS struct {
 	sb *superblock
 }
 
-func NewFS(r io.ReaderAt) (*FS, error) {
+func NewFS(r io.ReaderAt) (fs.FS, error) {
 	buf, err := readBytes(r, 8*kb, sbsize)
 	if err != nil {
 		return nil, fmt.Errorf("error reading superblock: %w", err)
