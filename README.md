@@ -43,8 +43,7 @@ NeXT (Disklabel + UFS):
 - Symbolic links and device nodes.
 - Creating partition tables.
 - Formatting UFS partitions.
-- Directiony creation and writing.
-- File creation.
+- Directory and file creation.
 
 ## License
 
