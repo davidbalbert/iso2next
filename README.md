@@ -10,7 +10,7 @@ A computer archaeology project: a tool to convert normal (ISO 9660) CD images to
 
 The Internet Archive has [CD images for NeXTSTEP 4.0 beta](https://archive.org/details/NeXTOSIMAGES), but they are ISO 9660 images, which are not bootable on NeXT hardware. I beleive this is true on Intel as well.
 
-It is still possible to install NeXTSTEP 4.0 beta by upgrading from NeXTSTEP 3.3, but it's not possible to do a clean install. Iso2next is an attempt to remedy that by being able to build a bootable CD image that uses UFS and NeXT's partitional table format.
+It is still possible to install NeXTSTEP 4.0 beta by upgrading from NeXTSTEP 3.3, but it's not possible to do a clean install. Iso2next is an attempt to remedy that by being able to build a bootable CD image that uses UFS and NeXT's partition table format.
 
 ## Current functionality
 
