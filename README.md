@@ -28,10 +28,10 @@ Help for individual commands is also available, e.g. by running `iso2next ls -he
 
 ISO 9660:
 - Reading files and directories.
-- Rock Ridge (POSIX extensions), including permissions, symlinks and device nodes.
-- Joliet (Unicode extensions).
+- Rock Ridge (POSIX extensions, long file names), including permissions, symlinks and device nodes.
+- Joliet (UTF-16, long file names).
 
-Joliet is generally more common on Windows and not used here. Rock Ridge 
+Joliet is generally more common on Windows and not used here. I implemented it before Rock Ridge because I didn't realize this was the case 😅.
 
 NeXT (Disklabel + UFS):
 - Reading files and directories.
