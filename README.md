@@ -8,7 +8,7 @@ A computer archaeology project: a tool to convert normal (ISO 9660) CD images to
 
 [NeXTSTEP 4.0 Beta](http://www.shawcomputing.net/resources/next/software/ns40_screenshots/index.html) (also known as OPENSTEP 4.0 PR1) was seeded to developers between NeXTSTEP 3.3 and OPENSTEP 4.0. The system GUI and the UI of many apps was a significant departure from earlier versions of NeXTSTEP. When OPENSTEP 4.0 was released, these changes had been reverted, though some of them reappeared in early versions of Rhapsody and Mac OS X. It's an interesting piece of computer history.
 
-The Internet Archive has [CD images for NeXTSTEP 4.0 beta](https://archive.org/details/NeXTOSIMAGES), but they are ISO 9660 images, which are not bootable on NeXT hardware. I beleive this is true on other supported platforms.
+The Internet Archive has [CD images for NeXTSTEP 4.0 beta](https://archive.org/details/NeXTOSIMAGES), but they are ISO 9660 images, which are not bootable on NeXT hardware. I beleive this is true on Intel as well.
 
 It is still possible to install NeXTSTEP 4.0 beta by upgrading from NeXTSTEP 3.3, but it's not possible to do a clean install. Iso2next is an attempt to remedy that by being able to build a bootable CD image that uses UFS and NeXT's partitional table format.
 
