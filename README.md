@@ -48,4 +48,4 @@ NeXT (Disklabel + UFS):
 
 ## License
 
-Watt is copyright David Albert and released under the terms of the MIT License.
+Iso2next is copyright David Albert and released under the terms of the MIT License.
