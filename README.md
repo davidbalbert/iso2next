@@ -31,7 +31,7 @@ ISO 9660:
 - Rock Ridge (POSIX extensions, long file names), including permissions, symlinks and device nodes.
 - Joliet (UTF-16, long file names).
 
-Joliet is generally more common on Windows and not used here. I implemented it before Rock Ridge because I didn't realize this was the case 😅.
+ISOs for UNIX systems like NeXTSTEP generally use Rock Ridge, not Joliet, which is the case here.
 
 NeXT (Disklabel + UFS):
 - Reading files and directories.
