@@ -70,9 +70,16 @@ func readDiskLabel(r io.ReaderAt) (*diskLabel, error) {
 
 	version := parseString(buf[:4])
 
-	// TODO: we only actually support version 3.
 	if version != dlv1 && version != dlv2 && version != dlv3 {
 		return nil, fmt.Errorf("can't find nextstep disk label")
+	}
+
+	if version == dlv1 {
+		return nil, fmt.Errorf("disk label version 1 is not supported")
+	}
+
+	if version == dlv2 {
+		return nil, fmt.Errorf(("disk label version 2 is not supported"))
 	}
 
 	label := parseString(buf[12:36])
