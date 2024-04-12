@@ -170,10 +170,6 @@ type offsetReaderAt struct {
 	offset int64
 }
 
-func newOffsetReaderAt(r io.ReaderAt, offset int64) *offsetReaderAt {
-	return &offsetReaderAt{r, offset}
-}
-
 func (r *offsetReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	return r.ReaderAt.ReadAt(p, r.offset+off)
 }
@@ -237,7 +233,7 @@ func (d *Disk) GetPartition(i int) (fs.FS, error) {
 
 	start := (int64(p.offset) + int64(d.label.frontPorchSectors)) * int64(d.label.sectsize)
 
-	return NewFS(newOffsetReaderAt(d.r, start))
+	return NewFS(&offsetReaderAt{d.r, start})
 }
 
 const (
