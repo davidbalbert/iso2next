@@ -1,3 +1,3 @@
 module github.com/davidbalbert/iso2next
 
-go 1.22
+go 1.23

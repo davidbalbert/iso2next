@@ -248,10 +248,18 @@ func ls() {
 		}
 
 		if fflag {
-			fmt.Println("/" + path + suffix)
+			fmt.Print("/" + path + suffix)
 		} else {
-			fmt.Println(fname + suffix)
+			fmt.Print(fname + suffix)
 		}
+
+		if dirent.Type() == fs.ModeSymlink {
+			link, err := fsutil.ReadLink(fsys, path)
+			if err == nil {
+				fmt.Print(" -> " + link)
+			}
+		}
+		fmt.Println()
 
 		if skipChildren {
 			return fs.SkipDir

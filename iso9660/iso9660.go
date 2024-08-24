@@ -1462,7 +1462,7 @@ func (fsys *isofs) Open(name string) (fs.File, error) {
 	return &file{fsys, dirent, 0}, nil
 }
 
-// SymlinkFS
+// ReadLinkFS
 
 func (fsys *isofs) ReadLink(name string) (string, error) {
 	if !fs.ValidPath(name) {
@@ -1481,14 +1481,14 @@ func (fsys *isofs) ReadLink(name string) (string, error) {
 	return dirent.symlink, nil
 }
 
-func (fsys *isofs) Lstat(name string) (fs.FileInfo, error) {
+func (fsys *isofs) StatLink(name string) (fs.FileInfo, error) {
 	if !fs.ValidPath(name) {
-		return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrInvalid}
+		return nil, &fs.PathError{Op: "statlink", Path: name, Err: fs.ErrInvalid}
 	}
 
 	dirent, err := fsys.walk(name)
 	if err != nil {
-		return nil, &fs.PathError{Op: "lstat", Path: name, Err: err}
+		return nil, &fs.PathError{Op: "statlink", Path: name, Err: err}
 	}
 
 	return dirent, nil
