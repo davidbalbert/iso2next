@@ -13,7 +13,6 @@ type Device interface {
 }
 
 // https://github.com/golang/go/issues/49580
-
 type ReadLinkFS interface {
 	fs.FS
 	ReadLink(name string) (string, error)
