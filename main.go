@@ -160,7 +160,7 @@ func ls() {
 		fflag = true
 	}
 
-	if flags.NArg() < 2 {
+	if flags.NArg() < 1 {
 		fmt.Printf("Usage: %s ls [-alfr] image_file path\n", os.Args[0])
 		flags.PrintDefaults()
 		os.Exit(1)
