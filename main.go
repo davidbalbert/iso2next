@@ -253,7 +253,7 @@ func ls() {
 			fmt.Print(fname + suffix)
 		}
 
-		if dirent.Type() == fs.ModeSymlink {
+		if lflag && dirent.Type() == fs.ModeSymlink {
 			link, err := fsutil.ReadLink(fsys, path)
 			if err == nil {
 				fmt.Print(" -> " + link)
