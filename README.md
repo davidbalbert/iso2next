@@ -17,7 +17,7 @@ It is still possible to install NeXTSTEP 4.0 beta by upgrading from NeXTSTEP 3.3
 ```
 iso2next cat image_file path
 iso2next cp image_file source_path destination_path
-iso2next ls [-alfrF] image_file path
+iso2next ls [-alfrFL] image_file path
 ```
 
 `image_file` can be the path to an ISO 9660 image or a NeXT formatted image.

@@ -429,6 +429,45 @@ func (fsys *nextfs) Open(name string) (fs.File, error) {
 	return newFile(fsys, inode), nil
 }
 
+// ReadLinkFS
+func (fsys *nextfs) ReadLink(name string) (string, error) {
+	if !fs.ValidPath(name) {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
+	}
+
+	inode, err := fsys.walk(name)
+	if err != nil {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: err}
+	}
+	if inode.Mode().Type() != fs.ModeSymlink {
+		return "", fmt.Errorf("%s is not a symlink", name)
+	}
+
+	if inode.fastSymlink != "" {
+		return inode.fastSymlink, nil
+	}
+
+	buf := make([]byte, inode.Size())
+	n, err := inode.ReadAt(buf, 0)
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return string(buf[:n]), nil
+}
+
+func (fsys *nextfs) StatLink(name string) (fs.FileInfo, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "statlink", Path: name, Err: fs.ErrInvalid}
+	}
+
+	inode, err := fsys.walk(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "statlink", Path: name, Err: err}
+	}
+
+	return inode, nil
+}
+
 type dirEntry struct {
 	inode *inode
 
@@ -453,20 +492,27 @@ type dirEntry struct {
 	name string
 }
 
-func (fsys *nextfs) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error) {
+func (fsys *nextfs) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, int64, error) {
 	buf, err := readBytes(r, offset+6, 2)
 	if err != nil {
-		return nil, fmt.Errorf("can't read directory entry name length: %w", err)
+		return nil, 0, fmt.Errorf("can't read directory entry name length: %w", err)
 	}
 
 	nameLen := binary.BigEndian.Uint16(buf)
 
 	buf, err = readBytes(r, offset, 8+int(nameLen))
 	if err != nil {
-		return nil, fmt.Errorf("can't read directory entry: %w", err)
+		return nil, 0, fmt.Errorf("can't read directory entry: %w", err)
 	}
 
 	dirent := parseDirEntry(buf)
+	consumed := int64(dirent.len)
+
+	// UFS directory slots with inode 0 are unused/deleted entries.
+	// Skip them here so callers never observe a dirEntry with a nil inode.
+	if dirent.ino == 0 {
+		return nil, consumed, nil
+	}
 
 	// NeXTSTEP's UFS uses the old directory entry format, which doesn't
 	// include file type. Because fs.DirEntry has a Type() method, we have
@@ -477,12 +523,12 @@ func (fsys *nextfs) readDirEntry(r io.ReaderAt, offset int64) (*dirEntry, error)
 
 	ip, err := fsys.readInode(dirent.ino, dirent.name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	dirent.inode = ip
 
-	return dirent, nil
+	return dirent, consumed, nil
 }
 
 func parseDirEntry(buf []byte) *dirEntry {
@@ -570,12 +616,16 @@ func (f *file) ReadDir(n int) ([]fs.DirEntry, error) {
 			break
 		}
 
-		dirent, err := f.fsys.readDirEntry(f.inode, f.offset)
+		dirent, consumed, err := f.fsys.readDirEntry(f.inode, f.offset)
 		if err != nil {
 			return entries, err
 		}
 
-		f.offset += int64(dirent.len)
+		f.offset += consumed
+
+		if dirent == nil {
+			continue
+		}
 
 		if dirent.name == "." || dirent.name == ".." {
 			continue
@@ -630,6 +680,8 @@ type inode struct {
 	gen        int32
 	uid        uint32
 	gid        uint32
+
+	fastSymlink string
 }
 
 func parseInode(buf []byte, name string, ino uint32, fsys *nextfs) *inode {
@@ -641,6 +693,8 @@ func parseInode(buf []byte, name string, ino uint32, fsys *nextfs) *inode {
 
 	inode.mode = binary.BigEndian.Uint16(buf[0:2])
 	inode.nlink = binary.BigEndian.Uint16(buf[2:4])
+	inode.uid = uint32(binary.BigEndian.Uint16(buf[4:6]))
+	inode.gid = uint32(binary.BigEndian.Uint16(buf[6:8]))
 	inode.size = binary.BigEndian.Uint64(buf[8:16])
 	inode.atime = binary.BigEndian.Uint32(buf[16:20])
 	inode.atimensec = binary.BigEndian.Uint32(buf[20:24])
@@ -657,8 +711,12 @@ func parseInode(buf []byte, name string, ino uint32, fsys *nextfs) *inode {
 	inode.flags = binary.BigEndian.Uint32(buf[100:104])
 	inode.blocksHeld = binary.BigEndian.Uint32(buf[104:108])
 	inode.gen = int32(binary.BigEndian.Uint32(buf[108:112]))
-	inode.uid = binary.BigEndian.Uint32(buf[112:116])
-	inode.gid = binary.BigEndian.Uint32(buf[116:120])
+
+	// In UFS fast symlink mode, short targets are stored inline in the inode
+	// where direct/indirect block pointers usually live (bytes 40..99).
+	if inode.mode&imSymlink == imSymlink && inode.size > 0 && inode.size <= 60 {
+		inode.fastSymlink = string(buf[40 : 40+inode.size])
+	}
 
 	return &inode
 }
